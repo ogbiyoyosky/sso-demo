@@ -1,0 +1,3 @@
+# Local environment files with real secrets — never commit these.
+# (.env.example is intentionally NOT ignored; it's the committed template.)
+.env

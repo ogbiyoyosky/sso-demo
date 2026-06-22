@@ -1,0 +1,149 @@
+{
+  "realm": "demo",
+  "enabled": true,
+  "sslRequired": "none",
+
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "verifyEmail": false,
+  "loginTheme": "promoting-queens",
+
+  "defaultRole": {
+    "name": "default-roles-demo",
+    "description": "${role_default-roles}",
+    "composite": true,
+    "clientRole": false,
+    "containerId": "demo"
+  },
+
+  "roles": {
+    "realm": [
+      {
+        "name": "employee",
+        "description": "In-house staff. Granted automatically to Entra sign-ins. Required by App Two (Internal Tools).",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "customer",
+        "description": "Outside user (self-registered with email + password). Granted to every new account via the default role.",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "default-roles-demo",
+        "description": "${role_default-roles}",
+        "composite": true,
+        "composites": {
+          "realm": ["customer"]
+        },
+        "clientRole": false,
+        "containerId": "demo"
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "auth-service",
+      "name": "Forward-auth service (the single OIDC client)",
+      "description": "Confidential OIDC client used by the Traefik forward-auth service. Both app hostnames are registered as redirect URIs because the one auth-service serves them all.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${AUTH_SERVICE_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://app-one.localhost/oauth2/callback",
+        "http://app-two.localhost/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://app-one.localhost",
+        "http://app-two.localhost"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://app-one.localhost/*##http://app-two.localhost/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles-claim",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft Entra ID",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize",
+        "tokenUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token",
+        "logoutUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/logout",
+        "userInfoUrl": "https://graph.microsoft.com/oidc/userinfo",
+        "issuer": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0",
+        "jwksUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "clientId": "${ENTRA_CLIENT_ID}",
+        "clientSecret": "${ENTRA_CLIENT_SECRET}",
+        "clientAuthMethod": "client_secret_post",
+        "defaultScope": "openid profile email",
+        "prompt": "select_account",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
+
+  "identityProviderMappers": [
+    {
+      "name": "email-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "email", "user.attribute": "email", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "first-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "given_name", "user.attribute": "firstName", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "last-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "family_name", "user.attribute": "lastName", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "grant-employee-role",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+      "config": { "role": "employee", "syncMode": "INHERIT" }
+    }
+  ]
+}

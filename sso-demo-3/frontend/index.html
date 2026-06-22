@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__APP_NAME__ — Kong OIDC + auth-service Demo</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #f3f4f6; display: flex; align-items: center; justify-content: center;
+           min-height: 100vh; margin: 0; }
+    .card { background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            padding: 2.5rem 3rem; text-align: center; max-width: 30rem; }
+    h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+    h1 .badge { color: __ACCENT__; }
+    p.sub { color: #6b7280; margin: 0 0 1.5rem; font-size: 0.9rem; }
+    .name { font-size: 1.2rem; font-weight: 600; }
+    .email { color: #6b7280; margin-bottom: 0.5rem; }
+    .pill { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.6rem;
+            border-radius: 999px; margin: 0.1rem; background: #eef2ff; color: #3730a3; }
+    .source { font-size: 0.85rem; color: #374151; margin-top: 0.75rem; }
+    button { font-size: 1rem; padding: 0.6rem 1.4rem; border: none; border-radius: 8px;
+             cursor: pointer; background: #e5e7eb; color: #111827; margin-top: 1.25rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="badge">__APP_NAME__</span></h1>
+    <p class="sub">__APP_TAGLINE__ &middot; Kong authenticates, auth-service authorizes</p>
+
+    <div id="loading">Loading your profile&hellip;</div>
+    <div id="ok" class="hidden">
+      <div class="name" id="user-name"></div>
+      <div class="email" id="user-email"></div>
+      <div id="user-roles"></div>
+      <div class="source" id="user-source"></div>
+      <button onclick="location.href='/oauth2/logout'">Logout</button>
+    </div>
+  </div>
+
+  <script>
+    // We only ever reach this page if Kong AUTHENTICATED us (its OIDC plugin)
+    // AND the auth-service AUTHORIZED us. (A user who is logged in but not
+    // permitted sees the auth-service's deny page instead; a user who is not
+    // logged in is redirected to Keycloak.) So there is no login button and no
+    // access-denied branch to handle here — just show who we are, read from
+    // /api/me (same origin → cookie sent automatically).
+    function rolecsv(roles) {
+      return (roles && roles.length)
+        ? roles.map(r => '<span class="pill">' + r + '</span>').join(' ')
+        : '<span class="pill">no roles</span>';
+    }
+    async function load() {
+      try {
+        const res = await fetch('/api/me');
+        const d = await res.json();
+        document.getElementById('user-name').textContent = d.name || '(no name)';
+        document.getElementById('user-email').textContent = d.email || '(no email)';
+        document.getElementById('user-roles').innerHTML = rolecsv(d.roles);
+        document.getElementById('user-source').textContent = 'Signed in via: ' + d.source;
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('ok').classList.remove('hidden');
+      } catch (e) {
+        document.getElementById('loading').textContent = 'Backend unreachable. Reload?';
+      }
+    }
+    load();
+  </script>
+</body>
+</html>

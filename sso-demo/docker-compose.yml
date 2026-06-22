@@ -1,0 +1,167 @@
+# OIDC SSO learning stack: Keycloak (broker) + Node.js backend (OIDC client) + static frontend.
+#
+# THE CRITICAL NETWORKING DETAIL (read this before debugging issuer errors):
+#
+#   The browser reaches Keycloak at  http://localhost:8080
+#   The backend container would normally reach it at  http://keycloak:8080
+#
+#   Tokens embed the issuer URL they were minted under. If the backend discovered
+#   Keycloak via http://keycloak:8080 while the browser used http://localhost:8080,
+#   the `iss` claim in the ID token would not match what the backend expects and
+#   validation would (correctly!) fail.
+#
+#   Our fix, in two halves:
+#     1. Keycloak is pinned to a single canonical hostname with KC_HOSTNAME=localhost,
+#        so every token and every discovery document says http://localhost:8080/...
+#        no matter which network interface the request arrived on.
+#     2. The backend treats http://localhost:8080 as the issuer for all *validation*
+#        purposes, but rewrites the host to keycloak:8080 at the HTTP layer for its
+#        server-to-server calls (discovery, token exchange). See backend/src/index.js,
+#        the `internalFetch` function.
+#
+#   Result: one consistent issuer everywhere, and no reliance on host networking hacks.
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: start-dev --import-realm
+    environment:
+      # Bootstrap admin account (KC 26+ naming; values come from .env)
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+
+      # Pin the canonical hostname so issuer URLs are ALWAYS http://localhost:8080
+      # regardless of whether the request came from the browser or the backend container.
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: "true"
+
+      # Enables /health/ready on the management port (9000) for the healthcheck below.
+      KC_HEALTH_ENABLED: "true"
+
+      # These are referenced from keycloak/realm-export.json via ${VAR} placeholders
+      # (substituted during realm import), so the secrets never live in the JSON itself.
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID}
+      ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID}
+      ENTRA_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET}
+      KC_WEBAPP_CLIENT_SECRET: ${KC_WEBAPP_CLIENT_SECRET:-change-me-demo-secret}
+      KC_WEBAPP2_CLIENT_SECRET: ${KC_WEBAPP2_CLIENT_SECRET:-change-me-demo-secret-2}
+    ports:
+      - "8080:8080"
+    volumes:
+      # Anything in /opt/keycloak/data/import is imported on startup because of --import-realm.
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      # The Keycloak image ships no curl/wget, so we talk to the management port (9000)
+      # with bash's built-in /dev/tcp redirection and grep the readiness JSON.
+      test:
+        - CMD-SHELL
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          grep -m 1 '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - sso
+
+  # ------------------------------------------------------------------
+  # App One: frontend :5173 + backend :3000, Keycloak client "web-app"
+  # ------------------------------------------------------------------
+  backend:
+    build: ./backend
+    environment:
+      # Issuer as the BROWSER sees it — used for discovery + token validation.
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/demo
+      # Where the backend ACTUALLY sends those requests inside the compose network.
+      KEYCLOAK_INTERNAL_HOST: keycloak:8080
+      CLIENT_ID: web-app
+      KC_WEBAPP_CLIENT_SECRET: ${KC_WEBAPP_CLIENT_SECRET:-change-me-demo-secret}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-session-secret}
+      FRONTEND_URL: http://localhost:5173
+      BACKEND_URL: http://localhost:3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      # node:20 has global fetch, so no extra tooling needed in the image.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - sso
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: http://localhost:3000
+        APP_NAME: App One
+        ACCENT: "#2563eb"
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    networks:
+      - sso
+
+  # ------------------------------------------------------------------
+  # App Two: frontend :5174 + backend :3001, Keycloak client "web-app-2"
+  #
+  # Same images, different identity. To Keycloak these are two unrelated
+  # applications — which is exactly what makes the SSO test meaningful:
+  # log in to App One, then App Two's login completes with NO Microsoft
+  # prompt, because the browser already holds a Keycloak SSO session.
+  # ------------------------------------------------------------------
+  backend2:
+    build: ./backend
+    environment:
+      KEYCLOAK_ISSUER: http://localhost:8080/realms/demo
+      KEYCLOAK_INTERNAL_HOST: keycloak:8080
+      CLIENT_ID: web-app-2
+      KC_WEBAPP_CLIENT_SECRET: ${KC_WEBAPP2_CLIENT_SECRET:-change-me-demo-secret-2}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me-session-secret}
+      FRONTEND_URL: http://localhost:5174
+      BACKEND_URL: http://localhost:3001
+    ports:
+      - "3001:3000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - sso
+
+  frontend2:
+    build:
+      context: ./frontend
+      args:
+        BACKEND_URL: http://localhost:3001
+        APP_NAME: App Two
+        ACCENT: "#059669"
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend2
+    networks:
+      - sso
+
+networks:
+  sso:
+    driver: bridge

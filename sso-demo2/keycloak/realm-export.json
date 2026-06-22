@@ -1,0 +1,188 @@
+{
+  "realm": "demo",
+  "enabled": true,
+  "sslRequired": "none",
+
+  "//": "DUAL ONBOARDING. registrationAllowed shows a 'Register' link on the login page so OUTSIDE users can self-register with email + password. The Microsoft Entra ID button (identity provider below) is for IN-HOUSE users. Both kinds of account are persisted to Postgres by Keycloak.",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "verifyEmail": false,
+  "loginTheme": "keycloak",
+
+  "//defaultRole": "Every new user (self-registered OR brokered from Entra) is granted default-roles-demo, which we make composite over the realm role 'customer'. In-house users ADDITIONALLY get 'employee' via the hardcoded IdP mapper below — that extra role is the in-house marker the apps check.",
+  "defaultRole": {
+    "name": "default-roles-demo",
+    "description": "${role_default-roles}",
+    "composite": true,
+    "clientRole": false,
+    "containerId": "demo"
+  },
+
+  "roles": {
+    "realm": [
+      {
+        "name": "employee",
+        "description": "In-house staff. Granted automatically to anyone who signs in through Microsoft Entra ID. Required by App Two (Internal Tools).",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "customer",
+        "description": "Outside user (self-registered with email + password). Granted to every new account via the default role.",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "default-roles-demo",
+        "description": "${role_default-roles}",
+        "composite": true,
+        "composites": {
+          "realm": ["offline_access", "uma_authorization", "customer"],
+          "client": {
+            "account": ["view-profile", "manage-account"]
+          }
+        },
+        "clientRole": false,
+        "containerId": "demo"
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "kong-app-one",
+      "name": "Kong — Customer Portal (App One)",
+      "description": "Confidential OIDC client used by the Kong oidc plugin for app-one.localhost. The secret is the demo default; change it in BOTH .env and kong/kong.yml together.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KONG_APP_ONE_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://app-one.localhost:8000/cb"],
+      "webOrigins": ["http://app-one.localhost:8000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://app-one.localhost:8000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles-to-userinfo",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "//": "Put the user's realm roles into a flat 'roles' claim and, crucially, into the USERINFO response — that is what Kong fetches and forwards to the backend as X-Userinfo.",
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "kong-app-two",
+      "name": "Kong — Internal Tools (App Two)",
+      "description": "Second confidential client (app-two.localhost). Separate client → separate Kong session, but the same Keycloak SSO session, which is what makes the silent second login a true SSO demonstration.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KONG_APP_TWO_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["http://app-two.localhost:8000/cb"],
+      "webOrigins": ["http://app-two.localhost:8000"],
+      "attributes": {
+        "post.logout.redirect.uris": "http://app-two.localhost:8000/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm-roles-to-userinfo",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "userinfo.token.claim": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft Entra ID",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize",
+        "tokenUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token",
+        "logoutUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/logout",
+        "userInfoUrl": "https://graph.microsoft.com/oidc/userinfo",
+        "issuer": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0",
+        "jwksUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "clientId": "${ENTRA_CLIENT_ID}",
+        "clientSecret": "${ENTRA_CLIENT_SECRET}",
+        "clientAuthMethod": "client_secret_post",
+        "defaultScope": "openid profile email",
+        "prompt": "select_account",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
+
+  "identityProviderMappers": [
+    {
+      "name": "email-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "email", "user.attribute": "email", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "first-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "given_name", "user.attribute": "firstName", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "last-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": { "claim": "family_name", "user.attribute": "lastName", "syncMode": "INHERIT" }
+    },
+    {
+      "name": "grant-employee-role",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-hardcoded-role-idp-mapper",
+      "config": {
+        "//": "Anyone who authenticates through Entra is in-house → grant the employee role. This is 'in-house users use Entra WITH ROLES'. Refine later with a claim/group mapper if you want finer-grained roles per Entra group.",
+        "role": "employee",
+        "syncMode": "INHERIT"
+      }
+    }
+  ]
+}

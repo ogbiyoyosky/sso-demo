@@ -1,0 +1,122 @@
+{
+  "realm": "demo",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginTheme": "keycloak",
+
+  "clients": [
+    {
+      "clientId": "web-app",
+      "name": "Demo Web App (Node.js backend)",
+      "description": "Confidential OIDC client. The Node backend exchanges authorization codes for tokens using this client's secret. The secret is injected from the environment so it never lives in this file.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KC_WEBAPP_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:5173##http://localhost:3000",
+        "pkce.code.challenge.method": "S256"
+      }
+    },
+    {
+      "clientId": "web-app-2",
+      "name": "Demo Web App TWO (second OIDC client, for the SSO test)",
+      "description": "A completely separate application as far as Keycloak is concerned. Because it lives in the same realm, a user who signed in to web-app already has a Keycloak SSO session — logging in here succeeds WITHOUT another Microsoft prompt. That is single sign-on.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KC_WEBAPP2_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3001/auth/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:5174",
+        "http://localhost:3001"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "http://localhost:5174##http://localhost:3001",
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+
+  "identityProviders": [
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft Entra ID",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "authorizationUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/authorize",
+        "tokenUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/token",
+        "logoutUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/oauth2/v2.0/logout",
+        "userInfoUrl": "https://graph.microsoft.com/oidc/userinfo",
+        "issuer": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0",
+        "jwksUrl": "https://login.microsoftonline.com/${ENTRA_TENANT_ID}/discovery/v2.0/keys",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "clientId": "${ENTRA_CLIENT_ID}",
+        "clientSecret": "${ENTRA_CLIENT_SECRET}",
+        "clientAuthMethod": "client_secret_post",
+        "defaultScope": "openid profile email",
+        "prompt": "select_account",
+        "syncMode": "IMPORT"
+      }
+    }
+  ],
+
+  "identityProviderMappers": [
+    {
+      "name": "email-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "claim": "email",
+        "user.attribute": "email",
+        "syncMode": "INHERIT"
+      }
+    },
+    {
+      "name": "first-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "claim": "given_name",
+        "user.attribute": "firstName",
+        "syncMode": "INHERIT"
+      }
+    },
+    {
+      "name": "last-name-importer",
+      "identityProviderAlias": "microsoft",
+      "identityProviderMapper": "oidc-user-attribute-idp-mapper",
+      "config": {
+        "claim": "family_name",
+        "user.attribute": "lastName",
+        "syncMode": "INHERIT"
+      }
+    }
+  ]
+}

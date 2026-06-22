@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SPIKE — Edge AuthN + Central AuthZ (Kong OIDC + auth-service)</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         color:#1f2937; line-height:1.5; font-size:11px; margin:0; }
+  h1 { font-size:22px; margin:0 0 2px; color:#0f172a; }
+  h2 { font-size:15px; margin:20px 0 7px; padding-bottom:4px; border-bottom:2px solid #e5e7eb; color:#111827; }
+  h3 { font-size:12.5px; margin:13px 0 3px; color:#374151; }
+  p { margin:5px 0; }
+  code { font-family:"SF Mono",Menlo,Consolas,monospace; font-size:.88em; background:#f1f5f9; padding:1px 4px; border-radius:3px; color:#9333ea; }
+  pre { background:#0f172a; color:#e2e8f0; padding:11px 13px; border-radius:7px;
+        font-family:"SF Mono",Menlo,Consolas,monospace; font-size:8.7px; line-height:1.32; white-space:pre; overflow:hidden; }
+  pre.diagram { background:#0b1220; color:#cbd5e1; }
+  pre code { background:none; color:inherit; padding:0; }
+  table { border-collapse:collapse; width:100%; margin:8px 0; font-size:10px; }
+  th,td { border:1px solid #d1d5db; padding:5px 7px; text-align:left; vertical-align:top; }
+  th { background:#f3f4f6; font-weight:600; }
+  .meta-table td:first-child { width:22%; font-weight:600; background:#fafafa; color:#374151; }
+  .tag { display:inline-block; font-size:9px; font-weight:700; padding:2px 7px; border-radius:4px; color:#fff; letter-spacing:.3px; }
+  .spike { background:#7c3aed; } .open { background:#0ea5e9; } .p2 { background:#f59e0b; }
+  .lead { font-size:12px; color:#475569; }
+  ul,ol { margin:5px 0; padding-left:20px; } li { margin:2px 0; }
+  .callout { border-left:4px solid #7c3aed; background:#faf5ff; padding:7px 11px; border-radius:0 6px 6px 0; margin:9px 0; font-size:10px; }
+  .callout.warn { border-color:#f59e0b; background:#fffbeb; }
+  .chk li { list-style:none; margin-left:-16px; }
+  .chk li::before { content:"\2610  "; color:#7c3aed; font-weight:700; }
+  .pagebreak { page-break-before:always; }
+  .muted { color:#64748b; font-size:10px; }
+  .two { display:flex; gap:14px; } .two>div{flex:1;}
+  .pill { font-family:"SF Mono",Menlo,monospace; font-size:9px; background:#eef2ff; color:#3730a3; padding:1px 5px; border-radius:4px; }
+  .est { font-size:13px; font-weight:700; color:#7c3aed; }
+</style>
+</head>
+<body>
+
+<h1>Edge Authentication &amp; Centralized Authorization</h1>
+<p class="lead">Kong (OIDC plugin) for authN + a single auth-service for authZ — investigation spike &amp; RFC</p>
+<p>
+  <span class="tag spike">SPIKE / RFC</span>
+  <span class="tag open">OPEN — DISCOVERY</span>
+  <span class="tag p2">PRIORITY: P2</span>
+</p>
+
+<table class="meta-table">
+  <tr><td>Issue type</td><td>Spike (time-boxed investigation) — proposes an RFC for review</td></tr>
+  <tr><td>Key</td><td>PLAT-XXX</td></tr>
+  <tr><td>Epic / Initiative</td><td>Platform AuthN/AuthZ consolidation</td></tr>
+  <tr><td>Components</td><td>api-gateway, identity, platform-infra</td></tr>
+  <tr><td>Labels</td><td><span class="pill">spike</span> <span class="pill">oidc</span> <span class="pill">kong</span> <span class="pill">keycloak</span> <span class="pill">rfc</span></td></tr>
+  <tr><td>Reporter</td><td>freeman@promotingqueens.org</td></tr>
+  <tr><td>Assignee</td><td>TBD</td></tr>
+  <tr><td>Story points / timebox</td><td>5 pts &middot; <b>3 days</b> timebox</td></tr>
+  <tr><td>Reference PoC</td><td><code>sso-demo-3/</code> (runnable; this ticket is derived from it)</td></tr>
+</table>
+
+<h2>Summary</h2>
+<p>Investigate moving authentication to the <b>edge gateway</b> and centralizing
+authorization in a <b>single policy service</b>, so application services hold
+<i>no</i> auth code. Concretely: <b>Kong's OIDC plugin</b> authenticates every
+request against <b>Keycloak</b> (which brokers to Microsoft Entra ID); Kong then
+forwards to an <b>auth-service</b> that evaluates a central policy and proxies
+allowed requests to the apps. Produce a recommendation (adopt / adopt-with-changes
+/ reject) plus the open questions, risks, and a reference implementation.</p>
+
+<h2>Background &amp; current state</h2>
+<p>We have validated three patterns in the <code>sso-demo*</code> PoCs. This spike
+evaluates the third for production adoption.</p>
+<table>
+  <tr><th>Pattern</th><th>OIDC client</th><th>AuthN</th><th>AuthZ</th><th>App auth code</th></tr>
+  <tr><td>In-app OIDC</td><td>each backend</td><td>each app</td><td>each app</td><td>lots, duplicated</td></tr>
+  <tr><td>Gateway authN</td><td>Kong plugin</td><td>gateway</td><td>each app (role checks)</td><td>some</td></tr>
+  <tr><td><b>This RFC</b></td><td>Kong plugin</td><td><b>gateway</b></td><td><b>central auth-service</b></td><td><b>none</b></td></tr>
+</table>
+<p>User identity is brokered: in-house staff sign in via <b>Entra</b> (granted the
+<code>employee</code> role); external users self-register with email + password
+(<code>customer</code>). All users persist in Keycloak's Postgres.</p>
+
+<h2>Goal of this spike (questions to answer)</h2>
+<ol>
+  <li>Is the <b>community kong-oidc plugin</b> viable on our Kong version (OSS 3.x), or do we need Kong Enterprise's OIDC / a different gateway?</li>
+  <li>What is the correct <b>issuer/hostname</b> strategy so tokens validate while the gateway reaches Keycloak internally and Entra's redirect-URI constraints hold?</li>
+  <li>Does centralizing authorization in one service give acceptable <b>latency</b> and an acceptable <b>blast radius</b> (it becomes a hot path / SPOF)?</li>
+  <li>What belongs in central policy vs. what must stay in the app (object-level authZ)?</li>
+  <li>What is the operational cost (HA, sessions/Redis, secret management, plugin maintenance)?</li>
+</ol>
+
+<h2>Proposed architecture (RFC) — component view</h2>
+<pre class="diagram">
+                         Browser (app-one.localhost / app-two.localhost)
+                             |
+                             v
+   +======================== Kong :80 (edge gateway) ========================+
+   |  oidc plugin  ==> AUTHENTICATION                                         |
+   |    - no session  -> 302 to Keycloak                                      |
+   |    - callback    -> code->token (to keycloak:8080), session in Redis     |
+   |    - inject header  X-Userinfo: base64({ sub,email,name,roles })         |
+   |  upstream (both apps) = auth-service     [preserve_host: true]           |
+   +===================================+======================================+
+                                       |
+                                       v
+   +===================== auth-service :4000 (policy + proxy) ================+
+   |  AUTHORIZATION (central POLICY table) + reverse proxy                    |
+   |    - decode X-Userinfo -> per-host rule (App Two => role 'employee')     |
+   |    - allow -> set X-Auth-{Email,Name,Roles,Sub} -> proxy onward          |
+   |    - deny  -> 403 page (app never reached)                               |
+   +=============+=======================================+====================+
+                 | (root path)                           | (/api/*)
+                 v                                        v
+        frontend1 / frontend2  (static)         backend1 / backend2 (echo only)
+
+       Kong  --(token / jwks / userinfo: keycloak:8080)-->  Keycloak :8080
+       Kong  --(sessions)-->  Redis :6379           Keycloak --> Entra ID (broker)
+                                                    Keycloak --> Postgres (users)
+</pre>
+
+<div class="callout"><b>Decision boundary (the heart of the RFC):</b> Kong answers
+<i>"are you logged in?"</i> (authentication). The auth-service answers
+<i>"may you reach this host/path?"</i> (authorization). Apps answer nothing — they
+trust headers set by the trusted edge.</div>
+
+<div class="pagebreak"></div>
+<h2>Request lifecycle — sequence diagram</h2>
+<pre class="diagram">
+ Browser            Kong (oidc)         Keycloak           auth-service        app
+   |  GET /              |                   |                   |              |
+   |------------------->|  no session        |                   |              |
+   |   302 -> Keycloak  |                    |                   |              |
+   |<-------------------|                    |                   |              |
+   |  GET /auth  --------------------------->|  login page       |              |
+   |   (Microsoft  OR  email+password / register)                |              |
+   |   302 .../oauth2/callback?code=...      |                   |              |
+   |------------------->|  POST /token  ----->| (keycloak:8080)   |              |
+   |                    |<--- id+access ------|                   |              |
+   |                    |  validate iss/sig/nonce; session->Redis |              |
+   |   302 /  (Set-Cookie: session)          |                   |              |
+   |<-------------------|                    |                   |              |
+   |  GET / (cookie)    |                    |                   |              |
+   |------------------->|  inject X-Userinfo |                   |              |
+   |                    |------------------------------------->  | authZ:       |
+   |                    |                    |        POLICY[host].requireRole? |
+   |                    |                    |                   |--allow------>|
+   |                    |                    |                   |  X-Auth-*    |
+   |                    |                    |                   |<---200-------|
+   |<---------------------------------------------------- 200 (or 403 page) ----|
+</pre>
+<p class="muted">AuthN = the first round-trip through Keycloak + session creation.
+AuthZ = the single <code>POLICY</code> lookup on the authenticated request. A
+customer hitting App Two authenticates successfully, then receives <b>403</b> — proving
+the two concerns are separated.</p>
+
+<h2>The issuer / hostname problem (must-solve)</h2>
+<p>OIDC clients validate the token <code>iss</code>, so the URL the <b>browser</b>
+uses and the URL the <b>gateway</b> uses server-side must yield the same issuer —
+while Entra only allows plain-http redirect URIs for the literal host
+<code>localhost</code>. lua-resty-openidc has no per-request URL rewrite hook, so
+we feed it a <b>pre-built discovery table with split URLs</b>:</p>
+<pre class="diagram">
+   issuer / authorization_endpoint / end_session_endpoint  -->  http://localhost:8080   (browser-facing; iss matches)
+   token_endpoint / userinfo_endpoint / jwks_uri           -->  http://keycloak:8080    (gateway-facing; reachable)
+</pre>
+<div class="callout warn"><b>Open question for prod:</b> behind real TLS + a public
+hostname this split collapses (one externally-resolvable issuer). Confirm the
+strategy for prod DNS so we don't ship a localhost-only hack. <b>SPIKE TASK.</b></div>
+
+<h2>Code snippet — the central policy (the only "business logic" of authZ)</h2>
+<pre><code>// auth-service: authZ is one declarative table + one check. Swap for OPA/Cedar later.
+const POLICY = {
+  'app-one.localhost': { appName: 'Customer Portal', requireRole: null },        // any authenticated user
+  'app-two.localhost': { appName: 'Internal Tools',  requireRole: 'employee' },  // employees only
+};
+
+app.use((req, res) => {
+  const host   = (req.headers.host || '').split(':')[0];
+  const claims = JSON.parse(Buffer.from(req.headers['x-userinfo'], 'base64').toString()); // set by Kong
+  const roles  = claims.roles || [];
+  const rule   = POLICY[host];
+
+  if (rule.requireRole &amp;&amp; !roles.includes(rule.requireRole))      // <-- AUTHORIZATION
+    return res.status(403).send(denyPage(rule, claims.email, roles));
+
+  req.headers['x-auth-email'] = claims.email;                       // hand identity to the app
+  req.headers['x-auth-roles'] = roles.join(',');
+  proxy.web(req, res, { target: req.url.startsWith('/api') ? backend(host) : frontend(host) });
+});</code></pre>
+
+<div class="pagebreak"></div>
+<h2>Key design decisions &amp; trade-offs</h2>
+<table>
+  <tr><th>Decision</th><th>Rationale</th><th>Trade-off / risk</th></tr>
+  <tr><td>OIDC at gateway (Kong plugin)</td><td>authN implemented once; apps in any language</td><td>community plugin needs a Kong-3.x port + version pinning</td></tr>
+  <tr><td>Central auth-service for authZ</td><td>one place for policy; uniform audit; zero-auth apps</td><td>extra hop; hot path; SPOF — must be HA</td></tr>
+  <tr><td>Sessions in Redis</td><td>lets the gateway scale horizontally</td><td>another stateful dependency to operate</td></tr>
+  <tr><td>Keycloak brokers to Entra</td><td>swap/add IdPs without app changes; one user store</td><td>Keycloak is itself critical infra</td></tr>
+  <tr><td>Coarse policy (host/role) at edge</td><td>fits gateway's visibility (line+headers)</td><td>object-level authZ ("owns this record?") stays in app</td></tr>
+</table>
+
+<h2>Spike tasks / investigation checklist</h2>
+<ul class="chk">
+  <li>Stand up the reference stack (<code>sso-demo-3</code>) and complete a real Entra login end-to-end (employee + customer).</li>
+  <li>Confirm kong-oidc plugin viability on our pinned Kong OSS version; document the build (luarocks manifest workaround, 2.x→3.x port).</li>
+  <li>Validate the issuer split locally; design the <b>production</b> issuer/DNS/TLS strategy.</li>
+  <li>Measure added latency of the Kong→auth-service hop (p50/p95) under load.</li>
+  <li>Define HA topology for auth-service + Redis + Keycloak; estimate cost.</li>
+  <li>Decide policy engine: hardcoded table vs. <b>OPA/Rego</b> vs. <b>Cedar</b>; PoC the chosen one.</li>
+  <li>Define the trust boundary enforcement (network policy / mTLS so apps can't be called directly).</li>
+  <li>Map object-level authZ that must remain in apps; document the split contract (headers).</li>
+  <li>Logout completeness (RP-initiated / id_token_hint) — current plugin version is limited.</li>
+</ul>
+
+<h2>Open questions &amp; risks</h2>
+<table>
+  <tr><th>#</th><th>Question / risk</th><th>Severity</th></tr>
+  <tr><td>1</td><td>Community kong-oidc maintenance burden; is Kong Enterprise OIDC or Envoy/oauth2-proxy a better long-term bet?</td><td>High</td></tr>
+  <tr><td>2</td><td>auth-service as SPOF/hot path — latency budget &amp; HA story must be proven before adoption.</td><td>High</td></tr>
+  <tr><td>3</td><td>Production issuer/TLS strategy (the split is a local-dev device).</td><td>Med</td></tr>
+  <tr><td>4</td><td>Header trust boundary — forged <code>X-Userinfo</code>/<code>X-Auth-*</code> if a backend is reachable directly.</td><td>High</td></tr>
+  <tr><td>5</td><td>Policy externalization &amp; testing (OPA/Cedar) — avoid policy drift / one-team coupling.</td><td>Med</td></tr>
+  <tr><td>6</td><td>Session store sizing &amp; eviction; logout/SLO across the IdP.</td><td>Low</td></tr>
+</table>
+
+<h2>Acceptance criteria (Definition of Done for this spike)</h2>
+<ul class="chk">
+  <li>Written recommendation: <b>adopt / adopt-with-changes / reject</b>, with justification.</li>
+  <li>All open questions above answered or converted into follow-up tickets.</li>
+  <li>Latency numbers for the extra authZ hop, under representative load.</li>
+  <li>Production issuer/TLS + HA topology documented (diagram).</li>
+  <li>Decision on the policy engine, with a small PoC if not the hardcoded table.</li>
+  <li>Trust-boundary enforcement approach defined (network policy / mTLS).</li>
+  <li>Demo to the team; follow-up implementation epic drafted if "adopt".</li>
+</ul>
+
+<h2>Estimate &amp; out of scope</h2>
+<p class="est">Timebox: 3 days (5 pts).</p>
+<p><b>Out of scope:</b> production rollout, app migration, the policy-engine
+implementation itself, and SIEM/audit pipeline wiring — each becomes its own
+ticket if we proceed.</p>
+
+<h2>References</h2>
+<ul>
+  <li>Reference PoC: <code>sso-demo-3/</code> (README + runnable compose stack).</li>
+  <li>Comparison of all three SSO patterns: <code>sso-demos-explained.pdf</code>.</li>
+  <li>kong-oidc (community), lua-resty-openidc, Keycloak identity brokering, Microsoft Entra ID app registration.</li>
+  <li>Policy-engine options for follow-up: Open Policy Agent (Rego), AWS Cedar.</li>
+</ul>
+
+</body>
+</html>

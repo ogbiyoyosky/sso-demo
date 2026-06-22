@@ -1,0 +1,19 @@
+{
+  "name": "sso-demo-backend",
+  "version": "1.0.0",
+  "description": "Confidential OIDC client of Keycloak (Authorization Code Flow + PKCE)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "openid-client": "^6.1.7"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

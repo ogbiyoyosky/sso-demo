@@ -1,0 +1,164 @@
+/* =========================================================================
+   "Promoting Queens" custom Keycloak login theme.
+   A split-screen layout: branded gradient panel on the left, form card on the
+   right. Deliberately unlike stock Keycloak so the override is obvious.
+   ========================================================================= */
+
+:root {
+  --pq-accent: #7c3aed;          /* royal purple */
+  --pq-accent-2: #db2777;        /* magenta */
+  --pq-ink: #0f172a;
+  --pq-muted: #64748b;
+  --pq-line: #e2e8f0;
+  --pq-bg: #f1f5f9;
+  --pq-radius: 14px;
+  --pq-font: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+.pq-body {
+  margin: 0;
+  font-family: var(--pq-font);
+  color: var(--pq-ink);
+  background: var(--pq-bg);
+  min-height: 100vh;
+}
+
+.pq-split {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  min-height: 100vh;
+}
+
+/* ---------- Brand panel ---------- */
+.pq-brand {
+  position: relative;
+  color: #fff;
+  padding: 3rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background:
+    radial-gradient(1200px 600px at -10% -20%, rgba(255,255,255,.18), transparent 60%),
+    linear-gradient(135deg, var(--pq-accent) 0%, var(--pq-accent-2) 100%);
+  overflow: hidden;
+}
+.pq-brand::after {
+  content: "";
+  position: absolute;
+  inset: auto -120px -160px auto;
+  width: 460px; height: 460px;
+  background: rgba(255,255,255,.08);
+  border-radius: 50%;
+}
+.pq-brand-inner { margin: auto 0; max-width: 22rem; position: relative; z-index: 1; }
+.pq-logo {
+  width: 76px; height: 76px;
+  display: grid; place-items: center;
+  font-size: 40px; line-height: 1;
+  background: rgba(255,255,255,.16);
+  border: 1px solid rgba(255,255,255,.35);
+  border-radius: 20px;
+  margin-bottom: 1.5rem;
+}
+.pq-brand h1 { font-size: 2.2rem; margin: 0 0 .6rem; letter-spacing: -.5px; }
+.pq-brand p  { font-size: 1.05rem; opacity: .9; margin: 0; line-height: 1.5; }
+.pq-brand-foot { position: relative; z-index: 1; font-size: .8rem; opacity: .8; }
+
+/* ---------- Form panel ---------- */
+.pq-panel { display: grid; place-items: center; padding: 2rem; }
+.pq-card {
+  width: 100%; max-width: 26rem;
+  background: #fff;
+  border: 1px solid var(--pq-line);
+  border-radius: var(--pq-radius);
+  box-shadow: 0 12px 40px rgba(15,23,42,.08);
+  padding: 2.4rem 2.2rem;
+}
+.pq-card h2 { margin: 0 0 .25rem; font-size: 1.5rem; letter-spacing: -.3px; }
+.pq-sub { margin: 0 0 1.5rem; color: var(--pq-muted); }
+
+.pq-form { display: flex; flex-direction: column; }
+.pq-form label { font-size: .82rem; font-weight: 600; margin: .7rem 0 .3rem; }
+.pq-input {
+  font-size: 1rem;
+  padding: .7rem .85rem;
+  border: 1px solid var(--pq-line);
+  border-radius: 10px;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.pq-input:focus { border-color: var(--pq-accent); box-shadow: 0 0 0 3px rgba(124,58,237,.15); }
+.pq-input-error { border-color: #dc2626; }
+
+.pq-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.pq-field { display: flex; flex-direction: column; }
+
+.pq-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: .9rem 0 1.1rem; font-size: .85rem;
+}
+.pq-check { display: inline-flex; align-items: center; gap: .4rem; color: var(--pq-muted); font-weight: 500; }
+
+.pq-btn {
+  font-size: 1rem; font-weight: 600;
+  padding: .8rem 1rem;
+  border: none; border-radius: 10px;
+  color: #fff; cursor: pointer;
+  background: linear-gradient(135deg, var(--pq-accent), var(--pq-accent-2));
+  transition: filter .15s, transform .05s;
+  margin-top: .4rem;
+}
+.pq-btn:hover { filter: brightness(1.06); }
+.pq-btn:active { transform: translateY(1px); }
+
+.pq-btn-social {
+  background: #fff; color: var(--pq-ink);
+  border: 1px solid var(--pq-line);
+  display: flex; align-items: center; justify-content: center; gap: .6rem;
+  text-decoration: none;
+}
+.pq-btn-social:hover { filter: none; background: #f8fafc; }
+.pq-ms-mark {
+  width: 16px; height: 16px; display: inline-block;
+  background:
+    linear-gradient(#f25022 0 0) 0 0/7px 7px no-repeat,
+    linear-gradient(#7fba00 0 0) 9px 0/7px 7px no-repeat,
+    linear-gradient(#00a4ef 0 0) 0 9px/7px 7px no-repeat,
+    linear-gradient(#ffb900 0 0) 9px 9px/7px 7px no-repeat;
+}
+
+.pq-divider {
+  display: flex; align-items: center; text-align: center;
+  color: var(--pq-muted); font-size: .8rem; margin: 1.3rem 0 1rem;
+}
+.pq-divider::before, .pq-divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--pq-line);
+}
+.pq-divider span { padding: 0 .8rem; }
+
+.pq-social { display: flex; flex-direction: column; gap: .6rem; }
+
+.pq-foot { text-align: center; margin: 1.5rem 0 0; color: var(--pq-muted); font-size: .9rem; }
+.pq-link { color: var(--pq-accent); font-weight: 600; text-decoration: none; }
+.pq-link:hover { text-decoration: underline; }
+
+.pq-field-error { color: #dc2626; font-size: .8rem; margin-top: .35rem; }
+
+.pq-alert {
+  border-radius: 10px; padding: .7rem .9rem; font-size: .88rem; margin-bottom: 1.1rem;
+  border: 1px solid transparent;
+}
+.pq-alert-error   { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+.pq-alert-success { background: #f0fdf4; color: #166534; border-color: #bbf7d0; }
+.pq-alert-warning { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.pq-alert-info    { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+
+/* ---------- Responsive: stack on small screens ---------- */
+@media (max-width: 820px) {
+  .pq-split { grid-template-columns: 1fr; }
+  .pq-brand { padding: 2.2rem; min-height: 220px; }
+  .pq-brand-inner { margin: 0; }
+  .pq-grid2 { grid-template-columns: 1fr; }
+}

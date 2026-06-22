@@ -1,0 +1,17 @@
+{
+  "name": "sso-demo-3-auth-service",
+  "version": "2.0.0",
+  "description": "Central authorization service + reverse proxy (authN handled by Kong's OIDC plugin)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

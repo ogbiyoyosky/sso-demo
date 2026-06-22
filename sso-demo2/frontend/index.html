@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__APP_NAME__ — Kong SSO Demo</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f3f4f6;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0;
+    }
+    .card {
+      background: white; border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      padding: 2.5rem 3rem; text-align: center; max-width: 30rem;
+    }
+    h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+    h1 .badge { color: __ACCENT__; }
+    p.sub { color: #6b7280; margin: 0 0 1.5rem; font-size: 0.9rem; }
+    .profile { margin-bottom: 1.25rem; }
+    .profile .name { font-size: 1.2rem; font-weight: 600; }
+    .profile .email { color: #6b7280; margin-bottom: 0.5rem; }
+    .pill {
+      display: inline-block; font-size: 0.75rem; font-weight: 600;
+      padding: 0.15rem 0.6rem; border-radius: 999px; margin: 0.1rem;
+      background: #eef2ff; color: #3730a3;
+    }
+    .source { font-size: 0.85rem; color: #374151; margin-top: 0.75rem; }
+    .denied { color: #b91c1c; font-weight: 600; margin: 1rem 0; }
+    button {
+      font-size: 1rem; padding: 0.6rem 1.4rem; border: none;
+      border-radius: 8px; cursor: pointer; background: #e5e7eb; color: #111827;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="badge">__APP_NAME__</span></h1>
+    <p class="sub">__APP_TAGLINE__ &middot; authenticated at the Kong gateway</p>
+
+    <div id="loading">Loading your profile&hellip;</div>
+
+    <!-- Authenticated AND authorized -->
+    <div id="ok" class="hidden">
+      <div class="profile">
+        <div class="name" id="user-name"></div>
+        <div class="email" id="user-email"></div>
+        <div id="user-roles"></div>
+        <div class="source" id="user-source"></div>
+      </div>
+      <button onclick="location.href='/logout'">Logout</button>
+    </div>
+
+    <!-- Authenticated but NOT authorized (e.g. a customer hitting Internal Tools) -->
+    <div id="denied" class="hidden">
+      <div class="denied" id="denied-msg"></div>
+      <div class="source" id="denied-who"></div>
+      <p style="margin-top:1rem"><button onclick="location.href='/logout'">Logout</button></p>
+    </div>
+  </div>
+
+  <script>
+    // Kong already authenticated us before this page could load, so there is no
+    // "logged out" state and no Login button — reaching this HTML at all proves
+    // a valid Keycloak session exists. We only need to ask the backend WHO we
+    // are and whether this particular app will let us in. Same origin (we are
+    // served through Kong on the same host as /api), so a plain relative fetch
+    // carries the session cookie automatically.
+    function show(id) {
+      for (const el of ['loading', 'ok', 'denied']) {
+        document.getElementById(el).classList.toggle('hidden', el !== id);
+      }
+    }
+
+    function rolecsv(roles) {
+      return (roles && roles.length)
+        ? roles.map(r => '<span class="pill">' + r + '</span>').join(' ')
+        : '<span class="pill">no roles</span>';
+    }
+
+    async function load() {
+      try {
+        const res = await fetch('/api/me');
+        const data = await res.json();
+        if (res.ok) {
+          document.getElementById('user-name').textContent = data.name || '(no name)';
+          document.getElementById('user-email').textContent = data.email || '(no email)';
+          document.getElementById('user-roles').innerHTML = rolecsv(data.roles);
+          document.getElementById('user-source').textContent = 'Signed in via: ' + data.source;
+          show('ok');
+        } else if (res.status === 403) {
+          // Authenticated by Kong, rejected by the app's role check.
+          document.getElementById('denied-msg').textContent =
+            'Access denied — "' + data.app + '" requires the "' + data.required_role + '" role.';
+          document.getElementById('denied-who').innerHTML =
+            (data.email || '') + '<br>' + rolecsv(data.roles) + '<br>' + data.source;
+          show('denied');
+        } else {
+          document.getElementById('loading').textContent =
+            'Unexpected response (' + res.status + '). Try reloading.';
+        }
+      } catch (err) {
+        document.getElementById('loading').textContent = 'Backend unreachable. Try reloading.';
+        console.error(err);
+      }
+    }
+
+    load();
+  </script>
+</body>
+</html>

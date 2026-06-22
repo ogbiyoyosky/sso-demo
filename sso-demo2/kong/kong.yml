@@ -1,0 +1,116 @@
+# Kong declarative (DB-less) configuration.
+#
+# Two apps, each on its own hostname so their session cookies never collide
+# (browsers scope cookies by host; two apps on the same host would share one
+# cookie — see ../sso-demo README for that exact gotcha). Different hosts here
+# means independent Kong sessions but ONE shared Keycloak SSO session — which is
+# what makes the two-app single-sign-on test meaningful (README §"two-app test").
+#
+#   http://app-one.localhost:8000  → Customer Portal (any authenticated user)
+#   http://app-two.localhost:8000  → Internal Tools  (employees only; the
+#                                     backend enforces the role, not Kong)
+#
+# Each app has TWO routes, both carrying the oidc plugin:
+#   • the "/" route  → the static frontend, and it owns the OIDC callback (/cb)
+#     and logout (/logout) paths.
+#   • the "/api" route → the Express backend; the plugin validates the existing
+#     session and injects the X-Userinfo header the backend reads.
+#
+# Because the oidc plugin guards the "/" route too, you CANNOT see the page
+# without a Keycloak session: hitting the app with no session bounces you
+# straight to Keycloak's login (where you pick Microsoft, or sign in / register
+# with email + password). That is "authentication at the gateway".
+#
+# NOTE ON SECRETS: Kong does not interpolate ${ENV} in this file. The
+# client_secret values below are hardcoded to the demo defaults that Keycloak
+# imports (KONG_APP_ONE_SECRET / KONG_APP_TWO_SECRET in .env). If you change
+# those in .env, change them here too, or the token exchange fails with
+# "invalid client credentials".
+
+_format_version: "3.0"
+_transform: true
+
+services:
+  # ======================= App One: Customer Portal =========================
+  - name: app-one-frontend
+    url: http://frontend1:80
+    routes:
+      - name: app-one-web
+        hosts: ["app-one.localhost"]
+        paths: ["/"]
+        # plugin attached below (route-scoped) so this also owns /cb and /logout
+    plugins:
+      - name: oidc
+        config: &oidc_app_one
+          client_id: kong-app-one
+          client_secret: change-me-kong-app-one
+          # Discovered server-to-server by Kong. Kong's `localhost` is the host
+          # machine (extra_hosts: localhost:host-gateway), where Keycloak's 8080
+          # is published — so the discovered issuer (http://localhost:8080/...)
+          # is reachable by Kong AND matches the browser's view. See README §4.
+          discovery: "http://localhost:8080/realms/demo/.well-known/openid-configuration"
+          # Where Keycloak sends the browser back. Must be registered on the
+          # kong-app-one client in realm-export.json, and must fall under this
+          # route (path "/" matches "/cb").
+          redirect_uri: "http://app-one.localhost:8000/cb"
+          scope: "openid profile email"
+          # Confidential client → authenticate to the token endpoint with the secret.
+          token_endpoint_auth_method: "client_secret_post"
+          # Plain http on localhost; never disable verification behind TLS.
+          ssl_verify: "no"
+          # Fixed key so sessions stay valid across Kong worker reloads.
+          session_secret: "demo-kong-oidc-session-secret-3232"
+          # RP-initiated logout: hitting /logout clears the Redis session AND
+          # redirects to Keycloak's end-session endpoint (with id_token_hint
+          # appended) so the SSO session dies too — otherwise the next visit
+          # would silently sign you straight back in.
+          logout_path: "/logout"
+          redirect_after_logout_uri: "http://localhost:8080/realms/demo/protocol/openid-connect/logout?post_logout_redirect_uri=http://app-one.localhost:8000/"
+          redirect_after_logout_with_id_token_hint: true
+
+  - name: app-one-backend
+    url: http://backend1:3000
+    routes:
+      - name: app-one-api
+        hosts: ["app-one.localhost"]
+        paths: ["/api"]
+        strip_path: false
+    plugins:
+      - name: oidc
+        # Same OIDC config: same client, same session. By the time the page
+        # calls /api the session already exists, so this instance just validates
+        # it and injects X-Userinfo for the backend.
+        config: *oidc_app_one
+
+  # ======================= App Two: Internal Tools ==========================
+  - name: app-two-frontend
+    url: http://frontend2:80
+    routes:
+      - name: app-two-web
+        hosts: ["app-two.localhost"]
+        paths: ["/"]
+    plugins:
+      - name: oidc
+        config: &oidc_app_two
+          client_id: kong-app-two
+          client_secret: change-me-kong-app-two
+          discovery: "http://localhost:8080/realms/demo/.well-known/openid-configuration"
+          redirect_uri: "http://app-two.localhost:8000/cb"
+          scope: "openid profile email"
+          token_endpoint_auth_method: "client_secret_post"
+          ssl_verify: "no"
+          session_secret: "demo-kong-oidc-session-secret-7878"
+          logout_path: "/logout"
+          redirect_after_logout_uri: "http://localhost:8080/realms/demo/protocol/openid-connect/logout?post_logout_redirect_uri=http://app-two.localhost:8000/"
+          redirect_after_logout_with_id_token_hint: true
+
+  - name: app-two-backend
+    url: http://backend2:3000
+    routes:
+      - name: app-two-api
+        hosts: ["app-two.localhost"]
+        paths: ["/api"]
+        strip_path: false
+    plugins:
+      - name: oidc
+        config: *oidc_app_two

@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SSO Demos Explained</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1f2937; line-height: 1.5; font-size: 11.5px; margin: 0;
+  }
+  h1 { font-size: 30px; margin: 0 0 4px; color: #111827; }
+  h2 { font-size: 19px; margin: 26px 0 8px; padding-bottom: 5px;
+       border-bottom: 2px solid #e5e7eb; color: #111827; }
+  h3 { font-size: 14px; margin: 16px 0 4px; color: #374151; }
+  p { margin: 6px 0; }
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.88em;
+         background: #f3f4f6; padding: 1px 4px; border-radius: 3px; color: #b91c1c; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 12px 14px; border-radius: 8px;
+        font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9.5px;
+        line-height: 1.35; overflow: hidden; white-space: pre; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10.5px; }
+  th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f3f4f6; font-weight: 600; }
+  .lead { font-size: 13px; color: #4b5563; margin: 8px 0 0; }
+  .tag { display:inline-block; font-size:10px; font-weight:600; padding:2px 8px;
+         border-radius: 999px; color:#fff; margin-right:6px; }
+  .t1 { background:#2563eb; } .t2 { background:#7c3aed; } .t3 { background:#059669; }
+  .callout { border-left: 4px solid #f59e0b; background: #fffbeb; padding: 8px 12px;
+             border-radius: 0 6px 6px 0; margin: 10px 0; font-size: 10.5px; }
+  .callout.info { border-color:#2563eb; background:#eff6ff; }
+  .callout b { color:#92400e; } .callout.info b { color:#1e40af; }
+  .pros { color:#065f46; } .cons { color:#991b1b; }
+  ul { margin: 6px 0; padding-left: 20px; } li { margin: 3px 0; }
+  .cols { display:flex; gap:16px; } .cols > div { flex:1; }
+  .cover { height: 245mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .sub { font-size:15px; color:#6b7280; margin-top:10px; }
+  .cover .meta { margin-top:40px; font-size:11px; color:#9ca3af; }
+  .pagebreak { page-break-before: always; }
+  .chip { font-family:"SF Mono",Menlo,monospace; font-size:10px; background:#eef2ff;
+          color:#3730a3; padding:1px 6px; border-radius:4px; }
+  .small { font-size:10px; color:#6b7280; }
+</style>
+</head>
+<body>
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <h1>Single Sign-On, Three Ways</h1>
+  <div class="sub">A walkthrough of three runnable OIDC learning projects —
+    from authentication inside the app, to the gateway, to a dedicated
+    forward-auth service.</div>
+  <div style="margin-top:30px">
+    <p><span class="tag t1">Demo 1</span> <b>sso-demo</b> — OIDC <i>in the app</i> (each backend is its own client)</p>
+    <p><span class="tag t2">Demo 2</span> <b>sso-demo2</b> — OIDC <i>at the gateway</i> (Kong plugin + Redis)</p>
+    <p><span class="tag t3">Demo 3</span> <b>sso-demo-3</b> — OIDC in a <i>forward-auth service</i> (Traefik + auth-service)</p>
+  </div>
+  <div class="meta">
+    All three use the same identity foundation: Keycloak as an OpenID Provider and
+    identity broker in front of Microsoft Entra ID, realm users persisted to
+    Postgres, in-house users signing in through Entra (role: <code>employee</code>)
+    and outside users self-registering with email + password (role: <code>customer</code>).
+  </div>
+</section>
+
+<!-- ============================ FOUNDATION ============================ -->
+<section class="pagebreak">
+<h2>The common foundation</h2>
+<p>Every demo solves the same problem — let in-house staff sign in with Microsoft
+and let outside users register with email + password — and shares the same
+identity layer. What changes between them is <b>where authentication and
+authorization happen</b>.</p>
+
+<h3>The building blocks (identical across all three)</h3>
+<table>
+  <tr><th>Component</th><th>Role</th></tr>
+  <tr><td><b>Microsoft Entra ID</b></td><td>The real identity provider for in-house users. Lives in Microsoft's cloud; set up by hand once (an app registration whose redirect URI is Keycloak's broker endpoint).</td></tr>
+  <tr><td><b>Keycloak</b></td><td>The OpenID Provider the apps trust, <i>and</i> an identity broker that delegates in-house logins to Entra. Also hosts the self-registration page for outside users. Swapping Entra for Google/Okta later needs zero app changes — that is the point of brokering.</td></tr>
+  <tr><td><b>Postgres</b></td><td>Keycloak's user store. Every account — brokered from Entra <i>and</i> self-registered — is persisted here. (Demo 1 used Keycloak's in-memory DB; Demos 2 &amp; 3 wire in Postgres.)</td></tr>
+  <tr><td><b>Roles</b></td><td>A hardcoded mapper grants <code>employee</code> to anyone who signs in through Entra; self-registered users get <code>customer</code>. Apps use these for access decisions.</td></tr>
+  <tr><td><b>Redis</b></td><td>Shared session store (Demos 2 &amp; 3). Keeps sessions out of any single node's memory so the auth layer can scale horizontally.</td></tr>
+</table>
+
+<h3>The two-app single sign-on test</h3>
+<p>Each demo runs <b>two independent apps</b>. Sign in to App One, then open App
+Two: it completes login with <b>no prompt</b>, because the browser already holds
+a Keycloak SSO session. That silent second login is single sign-on. The apps
+share no cookies or sessions — only the same Keycloak realm.</p>
+
+<div class="callout"><b>The recurring pitfall — issuer / hostname.</b>
+OIDC tokens embed the issuer URL (<code>iss</code>), and the client must validate
+it. The browser reaches Keycloak at <code>localhost:8080</code>, but a container
+reaches it at <code>keycloak:8080</code>. If the client discovers Keycloak under
+one name while tokens are minted under another, validation fails. Each demo
+fixes this differently (see below) — it is the single most common thing to get
+wrong.</div>
+</section>
+
+<!-- ============================ COMPARISON ============================ -->
+<section class="pagebreak">
+<h2>The three architectures at a glance</h2>
+<table>
+  <tr>
+    <th style="width:22%"></th>
+    <th><span class="tag t1">Demo 1</span> sso-demo</th>
+    <th><span class="tag t2">Demo 2</span> sso-demo2</th>
+    <th><span class="tag t3">Demo 3</span> sso-demo-3</th>
+  </tr>
+  <tr><td><b>Who is the OIDC client?</b></td>
+      <td>Each backend (one per app)</td>
+      <td>Kong (the gateway), via the <code>kong-oidc</code> plugin</td>
+      <td>One <b>auth-service</b></td></tr>
+  <tr><td><b>Authentication happens…</b></td>
+      <td>In every app</td>
+      <td>At the gateway</td>
+      <td>In the auth-service</td></tr>
+  <tr><td><b>Authorization (role checks)…</b></td>
+      <td>In every app</td>
+      <td>In every app (each backend checks roles)</td>
+      <td>In the auth-service (centralized policy)</td></tr>
+  <tr><td><b>Edge technology</b></td>
+      <td>None (direct to backend)</td>
+      <td>Kong API gateway</td>
+      <td>Traefik + ForwardAuth middleware</td></tr>
+  <tr><td><b>Sessions</b></td>
+      <td>In-memory (per backend)</td>
+      <td>Redis (Kong / lua-resty-session)</td>
+      <td>Redis (auth-service / express-session)</td></tr>
+  <tr><td><b>App code does auth?</b></td>
+      <td>Yes — all of it</td>
+      <td>Reads an injected header; still checks roles</td>
+      <td><b>No — zero auth code</b></td></tr>
+  <tr><td><b>Issuer/hostname fix</b></td>
+      <td><code>customFetch</code> host rewrite</td>
+      <td><code>localhost:host-gateway</code></td>
+      <td><code>customFetch</code> host rewrite</td></tr>
+</table>
+
+<div class="callout info"><b>The progression.</b> Each demo pushes auth further
+out of the application. Demo 1 duplicates security-critical code in every
+service. Demo 2 lifts <i>authentication</i> to the gateway but leaves
+<i>authorization</i> scattered. Demo 3 centralizes both, leaving the apps
+completely free of auth logic — at the cost of a new hot-path dependency.</div>
+</section>
+
+<!-- ============================ DEMO 1 ============================ -->
+<section class="pagebreak">
+<h2><span class="tag t1">Demo 1</span> sso-demo — OIDC inside the application</h2>
+<p class="lead">The classic, self-contained approach: each backend is a
+confidential OIDC client and runs the whole login flow itself.</p>
+
+<pre><code>┌──────────┐     ┌─────────────┐     ┌──────────┐     ┌──────────────┐
+│ Frontend │ ──► │  Backend     │ ──► │ Keycloak │ ──► │ Microsoft    │
+│ (static) │     │  (Express)   │     │ broker   │     │ Entra ID     │
+│          │     │  OIDC client │     │ + OP     │     │ (cloud)      │
+└──────────┘     └─────────────┘     └──────────┘     └──────────────┘
+   holds no        runs the code-flow,    delegates login
+   tokens          validates ID token     to Entra</code></pre>
+
+<h3>How it works</h3>
+<ul>
+  <li>The browser hits the backend's <code>/login</code>; the backend builds an
+    Authorization Code + PKCE request and redirects to Keycloak (with
+    <code>kc_idp_hint=microsoft</code> to jump straight to Entra).</li>
+  <li>After Entra authenticates the user, Keycloak issues its own code back to
+    the backend's <code>/auth/callback</code>. The backend exchanges it
+    server-to-server, and <code>openid-client</code> verifies the ID token's
+    signature, issuer, audience, expiry and nonce.</li>
+  <li>Claims go into an Express session (an <code>httpOnly</code> cookie). The
+    frontend calls <code>/api/me</code> to render name + email. It never sees a token.</li>
+  <li>Logout destroys the session <i>and</i> redirects to Keycloak's
+    end-session endpoint (RP-initiated logout) so the SSO session dies too.</li>
+</ul>
+
+<div class="callout info"><b>Issuer fix.</b> The backend validates against
+<code>localhost:8080</code> but rewrites the host to <code>keycloak:8080</code>
+at the HTTP layer via <code>openid-client</code>'s <code>customFetch</code> hook —
+issuer checks see "localhost", packets go to "keycloak".</div>
+
+<div class="cols">
+  <div>
+    <h3 class="pros">Pros</h3>
+    <ul>
+      <li>Simple to understand; no extra infrastructure.</li>
+      <li>Full control of the flow in app code.</li>
+      <li>Great for learning OIDC mechanics end to end.</li>
+    </ul>
+  </div>
+  <div>
+    <h3 class="cons">Cons</h3>
+    <ul>
+      <li>Security-critical code <b>duplicated in every service</b> — easy to drift.</li>
+      <li>Every team must re-implement auth correctly in their language.</li>
+      <li>In-memory sessions don't survive restarts or scale across instances.</li>
+    </ul>
+  </div>
+</div>
+<p class="small"><b>Use when:</b> a single app, a prototype, or you are learning how OIDC actually works.</p>
+</section>
+
+<!-- ============================ DEMO 2 ============================ -->
+<section class="pagebreak">
+<h2><span class="tag t2">Demo 2</span> sso-demo2 — OIDC at the gateway (Kong)</h2>
+<p class="lead">Authentication moves out of the apps and up into an API gateway.
+Kong is the OIDC client; the apps behind it read a header Kong injects.</p>
+
+<pre><code>Browser
+  │
+  ▼
+┌──────────────── Kong Gateway :8000 ─────────────────────┐
+│ kong-oidc plugin = confidential OIDC client of Keycloak  │
+│   • no session?  → redirect to Keycloak login            │
+│   • on return    → exchange code, store session in REDIS │
+│   • inject  X-Userinfo: base64({ email, roles, ... })    │
+└───┬──────────────────────────────────┬──────────────────┘
+    ▼ (frontend, static)                ▼ (/api → backend)
+ frontend1 / frontend2          backend1 / backend2  (read header, CHECK ROLE)
+                  │
+                  ▼
+            Keycloak :8080 ─► Entra ID        Redis ◄─ sessions
+            Postgres ◄─ users</code></pre>
+
+<h3>What's new vs Demo 1</h3>
+<ul>
+  <li><b>Kong</b> runs the OIDC flow once, at the edge. The apps contain no
+    <code>openid-client</code>, no token handling — they just decode the
+    <code>X-Userinfo</code> header Kong attaches.</li>
+  <li><b>Redis sessions</b> ("sticky"/shared): only a session id rides in the
+    cookie; the payload lives in Redis, so any Kong replica can resolve any
+    session and the load balancer is free to route anywhere.</li>
+  <li><b>Postgres</b> backs Keycloak, so all users are durably stored.</li>
+  <li><b>Dual login</b> on one Keycloak page: a Microsoft button (in-house →
+    <code>employee</code>) and a Register link (outside → <code>customer</code>).</li>
+</ul>
+
+<h3>Authentication vs authorization here</h3>
+<p>Kong answers <b>"are you logged in?"</b> (authentication). Each backend still
+answers <b>"do you have the right role?"</b> (authorization): App One (Customer
+Portal) lets any authenticated user in; App Two (Internal Tools) requires
+<code>employee</code> and returns <code>403</code> to a customer. So authZ is
+still scattered across the apps.</p>
+
+<div class="callout info"><b>Issuer fix.</b> Kong's Lua stack has no fetch-rewrite
+hook, so the container is given <span class="chip">extra_hosts: localhost:host-gateway</span>
+— its <code>localhost</code> resolves to the host machine where Keycloak's 8080
+is published. One issuer string everywhere.</div>
+
+<div class="cols">
+  <div>
+    <h3 class="pros">Pros</h3>
+    <ul>
+      <li>Authentication implemented <b>once</b>, not per app.</li>
+      <li>Apps shed all token/session code.</li>
+      <li>Shared Redis sessions enable horizontal scaling.</li>
+      <li>Language-agnostic: any backend just reads a header.</li>
+    </ul>
+  </div>
+  <div>
+    <h3 class="cons">Cons</h3>
+    <ul>
+      <li>Authorization still lives in every app (role checks duplicated).</li>
+      <li>The <code>kong-oidc</code> community plugin is version-sensitive.</li>
+      <li>The gateway is a new critical dependency to operate.</li>
+    </ul>
+  </div>
+</div>
+<p class="small"><b>Use when:</b> several apps should share one login, but each app owns its own (possibly resource-specific) authorization rules.</p>
+</section>
+
+<!-- ============================ DEMO 3 ============================ -->
+<section class="pagebreak">
+<h2><span class="tag t3">Demo 3</span> sso-demo-3 — forward-auth service (Traefik)</h2>
+<p class="lead">A single auth-service does <b>both</b> authentication and
+authorization at the edge. The apps become truly zero-auth — not even a role check.</p>
+
+<pre><code>Browser
+  │
+  ▼
+┌──────────────────── Traefik :80 ────────────────────────────┐
+│ forward-auth: on EVERY request, first ask the auth-service   │
+│    GET auth-service/auth  (+ X-Forwarded-Host / -Uri)        │
+│      200 → forward upstream + X-Auth-Email/-Name/-Roles      │
+│      302 → relay redirect to Keycloak (begin login)          │
+│      403 → relay the auth-service's "access denied" page     │
+│ (/oauth2/* bypasses this → straight to the auth-service)     │
+└────┬─────────────────────────────────────┬──────────────────┘
+     ▼ allowed                              ▼ allowed, /api
+ frontend1/2 (static)            backend1/2  (ECHO headers — no auth at all)
+                  ▲
+                  │  the ONE OIDC client
+            auth-service  ── authN: OIDC code flow
+                  │          authZ: per-host POLICY table
+                  ▼          sessions: Redis
+            Keycloak ─► Entra ID ;  Postgres ◄─ users</code></pre>
+
+<h3>The request lifecycle</h3>
+<ul>
+  <li>Traefik calls <code>auth-service/auth</code> before routing <i>any</i>
+    request, passing the original <code>X-Forwarded-Host/-Uri</code>.</li>
+  <li><b>No session</b> → the auth-service returns <code>302</code> to Keycloak;
+    Traefik relays it. After login, Keycloak hits
+    <code>/oauth2/callback</code> (which bypasses forward-auth, or login would
+    loop), the auth-service stores the user + roles, and redirects back.</li>
+  <li><b>Session + allowed</b> → <code>200</code> with
+    <code>X-Auth-Email/-Name/-Roles</code>, which Traefik copies onto the
+    upstream request. The backend just echoes them.</li>
+  <li><b>Session + wrong role</b> → <code>403</code> with a friendly deny page;
+    the app is never reached.</li>
+</ul>
+
+<h3>authN vs authZ, in one place</h3>
+<p>Authentication is the OIDC flow + session lookup. Authorization is a single
+centralized table — change a rule once, it applies everywhere:</p>
+<pre><code>const POLICY = {
+  'app-one.localhost': { requireRole: null },        // any authenticated user
+  'app-two.localhost': { requireRole: 'employee' },  // employees only
+};</code></pre>
+<p>A customer opening App Two authenticates fine, then the policy denies them —
+the app never runs. Swap this object for OPA/Rego or Cedar and nothing in the
+apps changes.</p>
+
+<div class="cols">
+  <div>
+    <h3 class="pros">Pros</h3>
+    <ul>
+      <li><b>One place for all policy</b> — authN and authZ both centralized.</li>
+      <li>Apps are truly zero-auth, in any language.</li>
+      <li>Uniform logging and one audit trail for every access decision.</li>
+      <li>Change a rule once; no app redeploys.</li>
+    </ul>
+  </div>
+  <div>
+    <h3 class="cons">Cons</h3>
+    <ul>
+      <li>A synchronous auth call on <b>every</b> request (latency).</li>
+      <li>Single point of failure / bottleneck — must be HA + fast.</li>
+      <li>Body-blind: object-level checks ("edit <i>this</i> doc") still need the app.</li>
+      <li>Central policy is a coupling point — one bad deploy affects all apps.</li>
+    </ul>
+  </div>
+</div>
+<p class="small"><b>Use when:</b> many heterogeneous services need consistent, centrally governed access control. <b>Overkill when:</b> a single app, or rules need per-resource context the gateway can't see.</p>
+</section>
+
+<!-- ============================ CLOSING ============================ -->
+<section class="pagebreak">
+<h2>Choosing between them</h2>
+<table>
+  <tr><th>If you…</th><th>Reach for</th></tr>
+  <tr><td>Are learning how OIDC actually works, or shipping one app</td><td><span class="tag t1">Demo 1</span> in-app OIDC</td></tr>
+  <tr><td>Have several apps that should share one login, but each owns its own (often resource-level) authorization</td><td><span class="tag t2">Demo 2</span> gateway authentication</td></tr>
+  <tr><td>Have many services and want authentication <i>and</i> coarse authorization governed centrally and consistently</td><td><span class="tag t3">Demo 3</span> forward-auth service</td></tr>
+</table>
+
+<h3>A common middle ground in practice</h3>
+<p>Real systems often blend these: the gateway/forward-auth layer handles
+authentication plus <i>coarse</i> authorization (route- and role-level gates),
+while individual apps keep only the <i>object-level</i> authorization that
+genuinely needs request context the edge can't see (e.g. "is Alice the owner of
+this specific record?"). You don't have to pick one model for everything.</p>
+
+<h3>What stays the same regardless of model</h3>
+<ul>
+  <li>Brokering through Keycloak means the apps never touch Microsoft directly —
+    swapping or adding identity providers is a Keycloak change, not an app change.</li>
+  <li>Tokens are validated, not trusted: signature, issuer, audience, expiry and
+    nonce are always checked by whoever is the OIDC client.</li>
+  <li>The issuer/hostname consistency rule is non-negotiable — the URL the
+    browser uses and the URL the client validates against must agree.</li>
+  <li>Sessions belong in a shared store (Redis) the moment you run more than one
+    instance of whatever holds them.</li>
+</ul>
+
+<div class="callout"><b>All three are local-learning stacks.</b> Plain HTTP,
+<code>secure=false</code> cookies, dev-mode Keycloak, and hardcoded secrets are
+deliberate conveniences. Production needs TLS everywhere, a secrets manager,
+HA for every shared component, and a hardened trust boundary so backends can't
+be reached (and their identity headers forged) except through the edge.</div>
+
+<p class="small" style="margin-top:30px">Each project ships a detailed README with
+setup, the full login flow, the two-app SSO test, and troubleshooting. This
+document summarizes and compares them.</p>
+</section>
+
+</body>
+</html>

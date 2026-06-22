@@ -1,0 +1,216 @@
+# =============================================================================
+# sso-demo-3 — Kong (OIDC plugin) for AUTHENTICATION + a central auth-service
+#              for AUTHORIZATION. The apps stay completely auth-free.
+# =============================================================================
+#
+# Compare the three demos:
+#   sso-demo   : each backend is its own OIDC client (auth logic duplicated).
+#   sso-demo2  : Kong's OIDC plugin does authN; each app does its OWN authZ.
+#   sso-demo-3 : Kong's OIDC plugin does authN; ONE auth-service does authZ for
+#                every app (central policy). Apps contain zero auth code.
+#
+#   Browser
+#     │  http://app-one.localhost     http://app-two.localhost
+#     ▼
+#  ┌──────────────────────── Kong :80 ──────────────────────────────────────┐
+#  │  oidc plugin = confidential OIDC client of Keycloak (AUTHENTICATION)     │
+#  │    • no session?  → redirect browser to Keycloak login                   │
+#  │    • on return    → exchange code, store session in REDIS                │
+#  │    • every request → inject  X-Userinfo: base64({ email, roles, … })     │
+#  │  upstream for BOTH apps = the auth-service (preserve_host: true)          │
+#  └────────────────────────────────┬────────────────────────────────────────┘
+#                                    ▼
+#  ┌──────────────────────── auth-service :4000 ─────────────────────────────┐
+#  │  AUTHORIZATION (central POLICY table) + reverse proxy:                    │
+#  │    • read X-Userinfo → apply per-host rule (App Two = employees only)     │
+#  │    • allow → set X-Auth-* headers, proxy to frontend (or /api → backend)  │
+#  │    • deny  → 403 "access denied" page (app never reached)                 │
+#  └───┬──────────────────────────────────────────────┬─────────────────────┘
+#      ▼ (allowed)                                      ▼ (allowed, /api)
+#   frontend1 / frontend2 (static)              backend1 / backend2 (echo headers)
+#
+#            ▲ server-to-server (discovery/token/jwks)         Redis ◄─ Kong sessions
+#            │
+#      Keycloak :8080 ── broker ──► Microsoft Entra ID
+#            │              "Microsoft" → employee ; "Register" → customer
+#            ▼
+#      Postgres :5432   ← all users persisted
+#
+# AuthN vs authZ, made literal:
+#   • Kong + the OIDC flow answer "WHO are you / are you logged in?".
+#   • The auth-service's POLICY table answers "may you reach THIS host?".
+#   Authorization lives in ONE place, so changing a rule is a one-file edit and
+#   the apps never grow auth code. (Trade-off: the auth-service is a hot path
+#   and a single point of failure — see README §"pros & cons".)
+#
+# Issuer/hostname note: KC_HOSTNAME stays localhost (the browser + token issuer).
+# lua-resty-openidc has no fetch-rewrite hook, so the vendored plugin hands it a
+# split discovery TABLE — browser-facing URLs (auth/logout) on localhost:8080,
+# server-facing URLs (token/jwks/userinfo) on keycloak:8080 (the `internal_host`
+# config). See kong/plugins/oidc/utils.lua.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keycloak}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [sso]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [sso]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak}
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID}
+      ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID}
+      ENTRA_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET}
+      AUTH_SERVICE_SECRET: ${AUTH_SERVICE_SECRET:-change-me-auth-service}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      # Custom login themes. /opt/keycloak/themes is the standard custom-theme
+      # dir; built-in themes ship inside the server jars, so this never shadows
+      # them. start-dev disables theme caching, so edits show on a page refresh.
+      - ./keycloak/themes:/opt/keycloak/themes:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          grep -m 1 '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    networks: [sso]
+
+  # ---------------------------------------------------------------------------
+  # auth-service — the single OIDC client; does authN (login) AND authZ (policy).
+  # NOT published to the host: reachable only on the compose network (by Traefik
+  # internally, and by the browser only through Traefik's /oauth2/* routes).
+  # ---------------------------------------------------------------------------
+  auth-service:
+    build: ./auth-service
+    # AuthZ + reverse proxy only — Kong's oidc plugin handles authentication now,
+    # so this service no longer needs Keycloak, Redis, or any OIDC config.
+    environment:
+      PORT: 4000
+    depends_on:
+      - backend1
+      - backend2
+      - frontend1
+      - frontend2
+    networks: [sso]
+
+  # ---------------------------------------------------------------------------
+  # Kong — edge gateway. Its `oidc` plugin AUTHENTICATES every request (OIDC code
+  # flow against Keycloak, sessions in Redis), injects X-Userinfo, then proxies
+  # to the auth-service which AUTHORIZES (central policy) and routes onward.
+  # ---------------------------------------------------------------------------
+  kong:
+    build: ./kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PLUGINS: bundled,oidc
+      # lua-resty-session reads its Redis config from the $session_* vars in this file.
+      KONG_NGINX_PROXY_INCLUDE: /kong/session.conf
+      KONG_PROXY_LISTEN: "0.0.0.0:80"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_LOG_LEVEL: info
+    ports:
+      - "80:80"       # all app traffic: http://app-one.localhost / http://app-two.localhost
+      - "8001:8001"   # Kong admin API (curl localhost:8001)
+    volumes:
+      - ./kong/kong.yml:/kong/kong.yml:ro
+      - ./kong/session.conf:/kong/session.conf:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    healthcheck:
+      # Numeric loopback, not the name "localhost" (we remapped that to host-gateway).
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [sso]
+
+  # --------------------------- App One: Customer Portal ----------------------
+  backend1:
+    build: ./backend
+    environment:
+      APP_NAME: Customer Portal
+    networks: [sso]
+
+  frontend1:
+    build:
+      context: ./frontend
+      args:
+        APP_NAME: Customer Portal
+        APP_TAGLINE: Open to employees and registered customers
+        ACCENT: "#2563eb"
+    networks: [sso]
+
+  # --------------------------- App Two: Internal Tools -----------------------
+  backend2:
+    build: ./backend
+    environment:
+      APP_NAME: Internal Tools
+    networks: [sso]
+
+  frontend2:
+    build:
+      context: ./frontend
+      args:
+        APP_NAME: Internal Tools
+        APP_TAGLINE: Employees only (Microsoft Entra ID sign-in)
+        ACCENT: "#059669"
+    networks: [sso]
+
+networks:
+  sso:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:

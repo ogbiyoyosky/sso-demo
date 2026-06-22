@@ -1,0 +1,16 @@
+{
+  "name": "sso-demo-3-backend",
+  "version": "1.0.0",
+  "description": "Zero-auth app server behind Traefik forward-auth; reads X-Auth-* headers",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

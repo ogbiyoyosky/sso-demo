@@ -1,0 +1,12 @@
+{
+  "name": "kong-oidc-js",
+  "version": "1.2.4-kong3-js",
+  "description": "Kong OIDC plugin in JavaScript",
+  "main": "handler.js",
+  "keywords": ["kong", "oidc", "openid-connect"],
+  "author": "Kong Community",
+  "license": "MIT",
+  "engines": {
+    "kong": ">=3.1.0"
+  }
+}

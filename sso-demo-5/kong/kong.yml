@@ -1,0 +1,48 @@
+# Kong declarative (DB-less) config for sso-demo-4 — one app behind the gateway.
+#
+# Kong's oidc plugin (JavaScript version, Kong 3.5+) AUTHENTICATES every request
+# against Keycloak and injects X-Userinfo (base64 JSON incl. roles). Two routes,
+# same upstream split:
+#   • "/"     → frontend (static SPA); also owns /oauth2/callback + /oauth2/logout
+#   • "/api"  → backend (reads X-Userinfo; no auth code)
+#
+# CONFIG NOTES:
+#   • redirect_uri_path is a PATH; openidc builds http://localhost:8000/oauth2/callback
+#     from the request host — matches the Keycloak `kong` client redirect URI.
+#   • internal_host = keycloak:8080 → Kong does server-side calls (token/jwks/
+#     userinfo) there, while browser-facing URLs stay on localhost:8080 and the
+#     id_token `iss` still matches. See kong/plugins/oidc/utils.lua.
+#   • the session secret comes from $session_secret in session.conf.
+#   • client_secret must equal Keycloak's `kong` client secret (KONG_CLIENT_SECRET).
+
+_format_version: "3.0"
+
+services:
+  - name: frontend
+    url: http://frontend:80
+    routes:
+      - name: web
+        paths: ["/"]
+        plugins:
+          - name: oidc
+            config: &oidc
+              client_id: kong
+              client_secret: change-me-kong-secret
+              discovery: "http://localhost:8080/realms/demo/.well-known/openid-configuration"
+              internal_host: "keycloak:8080"
+              redirect_uri_path: "/oauth2/callback"
+              scope: "openid profile email"
+              token_endpoint_auth_method: "client_secret_post"
+              ssl_verify: "no"
+              logout_path: "/oauth2/logout"
+              redirect_after_logout_uri: "http://localhost:8080/realms/demo/protocol/openid-connect/logout?client_id=kong&post_logout_redirect_uri=http://localhost:8000/"
+
+  - name: backend
+    url: http://backend:3000
+    routes:
+      - name: api
+        paths: ["/api"]
+        strip_path: false
+        plugins:
+          - name: oidc
+            config: *oidc

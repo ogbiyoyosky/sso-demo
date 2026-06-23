@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__APP_NAME__ — Keycloak + Kong</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background:#f3f4f6;
+           display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+    .card { background:#fff; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,.08);
+            padding:2.5rem 3rem; text-align:center; max-width:30rem; }
+    h1 { margin:0 0 .25rem; font-size:1.4rem; } h1 .badge { color:__ACCENT__; }
+    p.sub { color:#6b7280; margin:0 0 1.5rem; font-size:.9rem; }
+    .name { font-size:1.2rem; font-weight:600; } .email { color:#6b7280; margin-bottom:.5rem; }
+    .pill { display:inline-block; font-size:.75rem; font-weight:600; padding:.15rem .6rem;
+            border-radius:999px; margin:.1rem; background:#e0f2fe; color:#075985; }
+    button { font-size:1rem; padding:.6rem 1.4rem; border:none; border-radius:8px; cursor:pointer;
+             background:#e5e7eb; color:#111827; margin-top:1rem; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1><span class="badge">__APP_NAME__</span></h1>
+    <p class="sub">__APP_TAGLINE__ &middot; authenticated at the Kong gateway</p>
+
+    <div id="loading">Loading your profile&hellip;</div>
+    <div id="ok" class="hidden">
+      <div class="name" id="user-name"></div>
+      <div class="email" id="user-email"></div>
+      <div id="user-roles"></div>
+      <button onclick="location.href='/oauth2/logout'">Logout</button>
+    </div>
+  </div>
+
+  <script>
+    // Kong authenticated us before this page could load, so there's no logged-out
+    // state — we just ask /api/me who we are. Same origin → cookie sent automatically.
+    function show(id){ for (const el of ['loading','ok']) document.getElementById(el).classList.toggle('hidden', el!==id); }
+    function pills(roles){ return (roles&&roles.length) ? roles.map(r=>'<span class="pill">'+r+'</span>').join(' ') : '<span class="pill">no roles</span>'; }
+    async function load(){
+      try {
+        const res = await fetch('/api/me');
+        if (!res.ok) { document.getElementById('loading').textContent='Unexpected '+res.status+' — try reloading.'; return; }
+        const u = await res.json();
+        document.getElementById('user-name').textContent = u.name || u.username || '(no name)';
+        document.getElementById('user-email').textContent = u.email || '';
+        document.getElementById('user-roles').innerHTML = pills(u.roles);
+        show('ok');
+      } catch (e) { document.getElementById('loading').textContent='Backend unreachable.'; }
+    }
+    load();
+  </script>
+</body>
+</html>

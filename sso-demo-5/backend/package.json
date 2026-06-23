@@ -1,0 +1,16 @@
+{
+  "name": "sso-demo-4-backend",
+  "version": "1.0.0",
+  "description": "Zero-auth app server behind Kong; reads identity from X-Userinfo",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

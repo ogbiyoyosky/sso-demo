@@ -1,0 +1,134 @@
+# =============================================================================
+# sso-demo-5 — Kong + OIDC stack with JavaScript PDK plugin.
+#   Keycloak (OP) + Kong (gateway, OIDC plugin = authN) + one frontend + one
+#   backend + Redis for session storage. No Entra broker, no Postgres, no auth-service.
+#
+#   Browser ──► Kong :8000 ──(oidc plugin: authN, inject X-Userinfo)──► frontend
+#                  │                                                    backend (/api)
+#                  │                                                    Redis :6379
+#                  └──(token/jwks/userinfo: keycloak:8080)──► Keycloak :8080
+#
+# Kong OIDC plugin: JavaScript version via kong-js-pdk plugin server.
+#
+# Issuer/hostname note: KC_HOSTNAME=localhost (the browser + token issuer). Kong
+# can't reach Keycloak at localhost, so the JS plugin uses split-host logic —
+# browser-facing URLs (auth/logout) on localhost:8080, server-facing URLs
+# (token exchange) on keycloak:8080 (the `internal_host` config).
+#
+# Keycloak runs start-dev WITHOUT a database (in-memory): users vanish on
+# restart, but seed-users.sh re-creates them idempotently — which is the point.
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keycloak-pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [sso]
+
+  keycloak:
+    build: ./keycloak
+    command: start --import-realm --optimized
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: "true"
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-keycloak-pass}
+      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET:-change-me-kong-secret}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          grep -m 1 '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    networks: [sso]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [sso]
+
+  kong:
+    build: ./kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PLUGINS: bundled,oidc
+      KONG_PLUGINSERVER_NAMES: js
+      KONG_PLUGINSERVER_JS_SOCKET: /usr/local/kong/js_pluginserver.sock
+      KONG_PLUGINSERVER_JS_START_CMD: /usr/bin/kong-js-pluginserver -d /usr/local/kong/plugins -p /usr/local/kong --sock-name js_pluginserver.sock
+      KONG_PLUGINSERVER_JS_QUERY_CMD: /usr/bin/kong-js-pluginserver -d /usr/local/kong/plugins --dump-all-plugins
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_LOG_LEVEL: info
+      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET:-change-me-kong-secret}
+    ports:
+      - "8000:8000"   # app traffic: http://localhost:8000
+      - "8001:8001"   # Kong admin API
+    volumes:
+      - ./kong/kong.yml:/kong/kong.yml:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [sso]
+
+  backend:
+    build: ./backend
+    environment:
+      APP_NAME: Demo 5 API
+    networks: [sso]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        APP_NAME: "Demo 5"
+        APP_TAGLINE: "Keycloak + Kong, JS PDK OIDC plugin"
+        ACCENT: "#8b5cf6"
+    networks: [sso]
+
+networks:
+  sso:
+    driver: bridge
+
+volumes:
+  postgres_data:

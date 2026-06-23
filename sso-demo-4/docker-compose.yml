@@ -1,0 +1,113 @@
+# =============================================================================
+# sso-demo-4 — the MINIMAL Kong + OIDC stack.
+#   Keycloak (OP) + Kong (gateway, OIDC plugin = authN) + one frontend + one
+#   backend + Redis for session storage. No Entra broker, no Postgres, no auth-service.
+#
+# Users are NOT self-registered and NOT brokered — they are created by an
+# idempotent script (./seed-users.sh) against Keycloak's Admin API. Run it any
+# number of times; it converges to the desired set of users.
+#
+#   Browser ──► Kong :8000 ──(oidc plugin: authN, inject X-Userinfo)──► frontend
+#                  │                                                    backend (/api)
+#                  │                                                    Redis :6379
+#                  └──(token/jwks/userinfo: keycloak:8080)──► Keycloak :8080
+#
+# Kong OIDC plugin: JavaScript version (Kong 3.5+ PDK) instead of Lua.
+#
+# Issuer/hostname note: KC_HOSTNAME=localhost (the browser + token issuer). Kong
+# can't reach Keycloak at localhost, and lua-resty-openidc has no URL-rewrite
+# hook, so the vendored plugin is handed a split discovery table — browser-facing
+# URLs (auth/logout) on localhost:8080, server-facing URLs (token/jwks/userinfo)
+# on keycloak:8080 (the `internal_host` config). See kong/plugins/oidc/utils.lua.
+#
+# Keycloak runs start-dev WITHOUT a database (in-memory): users vanish on
+# restart, but seed-users.sh re-creates them idempotently — which is the point.
+# =============================================================================
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HOSTNAME: localhost
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET:-change-me-kong-secret}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          grep -m 1 '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s
+    networks: [sso]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [sso]
+
+  kong:
+    build: ./kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /kong/kong.yml
+      KONG_PLUGINS: bundled,oidc
+      KONG_NGINX_PROXY_INCLUDE: /kong/session.conf
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_LOG_LEVEL: info
+      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET:-change-me-kong-secret}
+    ports:
+      - "8000:8000"   # app traffic: http://localhost:8000
+      - "8001:8001"   # Kong admin API
+    volumes:
+      - ./kong/kong.yml:/kong/kong.yml:ro
+      - ./kong/session.conf:/kong/session.conf:ro
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [sso]
+
+  backend:
+    build: ./backend
+    environment:
+      APP_NAME: Demo 4 API
+    networks: [sso]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        APP_NAME: Demo 4
+        APP_TAGLINE: Keycloak + Kong, users seeded by script
+        ACCENT: "#0ea5e9"
+    networks: [sso]
+
+networks:
+  sso:
+    driver: bridge

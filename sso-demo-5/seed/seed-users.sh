@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 
 # Pick up KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD / KONG_CLIENT_SECRET from .env
 # if it's there, so the admin creds match the running stack.
-if [ -f .env ]; then set -a; . ./.env; set +a; fi
+if [ -f ../.env ]; then set -a; . ../.env; set +a; fi
 
 export KC_URL="${KC_URL:-http://localhost:8080}"
 export REALM="${REALM:-demo}"

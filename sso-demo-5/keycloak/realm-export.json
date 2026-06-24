@@ -41,10 +41,10 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["http://localhost:8000/oauth2/callback"],
-      "webOrigins": ["http://localhost:8000"],
+      "redirectUris": ["${APP_BASE_URL}/oauth2/callback"],
+      "webOrigins": ["${APP_BASE_URL}"],
       "attributes": {
-        "post.logout.redirect.uris": "http://localhost:8000/*"
+        "post.logout.redirect.uris": "${APP_BASE_URL}/*"
       },
       "protocolMappers": [
         {

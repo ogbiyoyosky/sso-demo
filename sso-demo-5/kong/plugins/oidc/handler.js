@@ -1,55 +1,91 @@
 'use strict';
 
 /**
- * Kong OIDC plugin — JavaScript implementation via kong-js-pdk.
+ * Kong OIDC plugin — provider-agnostic JavaScript implementation via kong-js-pdk.
+ *
+ * Supports Keycloak (dev/staging) and Microsoft Entra ID (production) without
+ * code changes. The active provider is selected by OIDC_PROVIDER in .env and
+ * resolved by kong/entrypoint.sh into generic OIDC_* config vars.
  *
  * Flow:
- *   1. If request has a valid oidc_session cookie → look up session in Redis,
+ *   1. Startup: fetch + cache the provider's discovery document.
+ *   2. Incoming request with valid oidc_session cookie → look up Redis session,
  *      inject X-Userinfo + X-Access-Token headers, pass through.
- *   2. If path is /oauth2/callback → verify state, exchange code for tokens,
- *      create session in Redis, set cookie, redirect to original path.
- *   3. If path is /oauth2/logout  → delete session, clear cookie, redirect to
- *      Keycloak end-session URL.
- *   4. Otherwise → generate state + nonce, store in Redis (10 min TTL), redirect
- *      to Keycloak authorization endpoint.
+ *   3. Path = redirect_uri_path (/oauth2/callback) → exchange code, create session.
+ *   4. Path = logout_path (/oauth2/logout) → delete session, redirect to provider
+ *      end_session_endpoint with post_logout_redirect_uri.
+ *   5. No session → redirect to provider authorization_endpoint.
  *
- * Split-host logic:
- *   Browser-facing URLs (authorization_endpoint, end_session_endpoint) use the
- *   issuer derived from config.discovery (e.g. http://localhost:8080/realms/demo).
- *   Server-facing URLs (token_endpoint) replace the host with config.internal_host
- *   (e.g. keycloak:8080) so Kong can reach Keycloak inside Docker.
+ * Split-host (Keycloak only):
+ *   When internal_host is set, the discovery document is fetched via that internal
+ *   address, and token_endpoint is rewritten to use it. authorization_endpoint and
+ *   end_session_endpoint remain on the public host (browser-facing).
+ *   For Entra, internal_host is empty and all endpoints are used as-is from the
+ *   discovery document.
  */
 
 const crypto = require('crypto');
 const http   = require('http');
+const https  = require('https');
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Build browser-facing and server-facing OIDC endpoints from the discovery URL.
- * We do NOT fetch the discovery document at runtime to keep startup cheap and
- * avoid async complexity in the constructor; the Keycloak paths are well-known.
+ * Fetch the OIDC discovery document.
+ * If internalHost is set (Keycloak split-host), rewrites the fetch URL so Kong
+ * can reach Keycloak inside Docker, but keeps browser-facing endpoint URLs intact.
  */
-function buildEndpoints(config) {
-  // Strip trailing /.well-known/openid-configuration
-  const issuer   = config.discovery.replace(/\/\.well-known\/openid-configuration$/, '');
-  // Path segment after the host, e.g. /realms/demo
-  const realmPath = issuer.replace(/^https?:\/\/[^/]+/, '');
-  const internal  = `http://${config.internal_host || 'keycloak:8080'}${realmPath}`;
+function fetchDiscovery(discoveryUrl, internalHost) {
+  return new Promise((resolve, reject) => {
+    let fetchUrl = discoveryUrl;
+    if (internalHost) {
+      fetchUrl = discoveryUrl.replace(/^https?:\/\/[^/]+/, `http://${internalHost}`);
+    }
 
-  return {
-    authorization_endpoint: `${issuer}/protocol/openid-connect/auth`,
-    end_session_endpoint:   `${issuer}/protocol/openid-connect/logout`,
-    token_endpoint:         `${internal}/protocol/openid-connect/token`,
-  };
+    const u   = new URL(fetchUrl);
+    const mod = u.protocol === 'https:' ? https : http;
+
+    const req = mod.get(
+      {
+        hostname: u.hostname,
+        port:     u.port || (u.protocol === 'https:' ? 443 : 80),
+        path:     u.pathname + (u.search || ''),
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => {
+          try {
+            const doc = JSON.parse(Buffer.concat(chunks).toString());
+            // token_endpoint is server-facing: rewrite host to internalHost when set.
+            // authorization_endpoint + end_session_endpoint are browser-facing: use as-is.
+            let tokenEndpoint = doc.token_endpoint;
+            if (internalHost) {
+              tokenEndpoint = doc.token_endpoint.replace(
+                /^https?:\/\/[^/]+/,
+                `http://${internalHost}`
+              );
+            }
+            resolve({
+              authorization_endpoint: doc.authorization_endpoint,
+              token_endpoint:         tokenEndpoint,
+              end_session_endpoint:   doc.end_session_endpoint,
+            });
+          } catch (e) {
+            reject(new Error(`Failed to parse discovery doc from ${fetchUrl}: ${e.message}`));
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 /**
  * Parse the payload of a JWT without verifying the signature.
- * The ID token is issued by Keycloak and trusted implicitly here; full
- * signature verification would require fetching JWKS — out of scope for this demo.
  */
 function parseJwtPayload(token) {
   const b64url = token.split('.')[1];
@@ -58,8 +94,7 @@ function parseJwtPayload(token) {
 }
 
 /**
- * Parse Cookie header into a plain object.
- * e.g. "foo=bar; baz=qux" → { foo: 'bar', baz: 'qux' }
+ * Parse Cookie header into { name: value } pairs.
  */
 function parseCookies(cookieHeader) {
   const out = {};
@@ -67,9 +102,7 @@ function parseCookies(cookieHeader) {
   for (const pair of cookieHeader.split(';')) {
     const idx = pair.indexOf('=');
     if (idx < 0) continue;
-    const key = pair.slice(0, idx).trim();
-    const val = pair.slice(idx + 1).trim();
-    out[key]  = decodeURIComponent(val);
+    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
   }
   return out;
 }
@@ -84,15 +117,17 @@ function encodeForm(obj) {
 }
 
 /**
- * Perform an HTTP POST and return { status, body } where body is parsed JSON.
+ * HTTP(S) POST — returns { status, body } with body parsed as JSON.
+ * Automatically selects http/https module based on the URL scheme.
  */
 function httpPost(url, bodyStr) {
   return new Promise((resolve, reject) => {
     const u   = new URL(url);
-    const req = http.request(
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(
       {
         hostname: u.hostname,
-        port:     u.port || 80,
+        port:     u.port || (u.protocol === 'https:' ? 443 : 80),
         path:     u.pathname + (u.search || ''),
         method:   'POST',
         headers:  {
@@ -102,12 +137,12 @@ function httpPost(url, bodyStr) {
       },
       (res) => {
         const chunks = [];
-        res.on('data', (d) => chunks.push(d));
+        res.on('data', d => chunks.push(d));
         res.on('end', () => {
           try {
             resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString()) });
           } catch (e) {
-            reject(new Error(`Non-JSON response from token endpoint (${res.statusCode}): ${Buffer.concat(chunks).toString()}`));
+            reject(new Error(`Non-JSON response (${res.statusCode}): ${Buffer.concat(chunks)}`));
           }
         });
       }
@@ -118,9 +153,6 @@ function httpPost(url, bodyStr) {
   });
 }
 
-/**
- * Generate a cryptographically random hex string.
- */
 function randomHex(bytes = 24) {
   return crypto.randomBytes(bytes).toString('hex');
 }
@@ -131,19 +163,34 @@ function randomHex(bytes = 24) {
 
 class OidcPlugin {
   constructor(config) {
-    this.config    = config;
-    this.endpoints = buildEndpoints(config);
-    // One Redis client per plugin instance, shared across requests.
+    this.config = config;
+    // Kick off discovery fetch at instantiation; cache the promise so every
+    // request awaits the same resolved value after the first resolution.
+    this._endpoints = fetchDiscovery(
+      config.discovery,
+      config.internal_host || ''
+    );
+    this._endpoints.catch(err =>
+      console.error('[oidc] Discovery fetch failed:', err.message)
+    );
+
     this.redis = new (require('ioredis'))({
-      host:           process.env.REDIS_HOST || 'redis',
-      port:           parseInt(process.env.REDIS_PORT || '6379', 10),
-      lazyConnect:    false,
+      host:             process.env.REDIS_HOST || 'redis',
+      port:             parseInt(process.env.REDIS_PORT || '6379', 10),
+      lazyConnect:      false,
       reconnectOnError: () => true,
     });
-    this.redis.on('error', (err) => {
-      // Log but don't crash — Kong will surface errors per-request.
-      console.error('[oidc] Redis error:', err.message);
-    });
+    this.redis.on('error', err => console.error('[oidc] Redis error:', err.message));
+  }
+
+  async _getEndpoints(kong) {
+    try {
+      return await this._endpoints;
+    } catch (err) {
+      console.error('[oidc] Discovery unavailable:', err.message);
+      await kong.response.exit(502, 'OIDC provider unavailable', { 'Content-Type': 'text/plain' });
+      return null;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -151,51 +198,32 @@ class OidcPlugin {
   // -------------------------------------------------------------------------
 
   async access(kong) {
-    const config = this.config;
-    const path   = await kong.request.getPath();
+    const path         = await kong.request.getPath();
+    const callbackPath = this.config.redirect_uri_path || '/oauth2/callback';
+    const logoutPath   = this.config.logout_path       || '/oauth2/logout';
 
-    // -----------------------------------------------------------------------
-    // 1. Callback — exchange authorization code for tokens
-    // -----------------------------------------------------------------------
-    const callbackPath = config.redirect_uri_path || '/oauth2/callback';
-    if (path === callbackPath) {
-      return this._handleCallback(kong);
-    }
+    if (path === callbackPath) return this._handleCallback(kong);
+    if (path === logoutPath)   return this._handleLogout(kong);
 
-    // -----------------------------------------------------------------------
-    // 2. Logout
-    // -----------------------------------------------------------------------
-    const logoutPath = config.logout_path || '/oauth2/logout';
-    if (path === logoutPath) {
-      return this._handleLogout(kong);
-    }
-
-    // -----------------------------------------------------------------------
-    // 3. Check existing session
-    // -----------------------------------------------------------------------
-    const cookieHeader = await kong.request.getHeader('Cookie');
-    const cookies      = parseCookies(cookieHeader);
-    const sessionId    = cookies['oidc_session'];
+    const cookies   = parseCookies(await kong.request.getHeader('Cookie'));
+    const sessionId = cookies['oidc_session'];
 
     if (sessionId) {
       const sessionJson = await this.redis.get(`oidc:session:${sessionId}`);
       if (sessionJson) {
         let session;
-        try { session = JSON.parse(sessionJson); } catch (_) { /* fall through */ }
+        try { session = JSON.parse(sessionJson); } catch (_) {}
         if (session) {
-          // Inject upstream headers and let the request pass through.
-          const userinfoB64 = Buffer.from(JSON.stringify(session.userinfo)).toString('base64');
-          await kong.service.request.setHeader('X-Userinfo',     userinfoB64);
+          await kong.service.request.setHeader(
+            'X-Userinfo',
+            Buffer.from(JSON.stringify(session.userinfo)).toString('base64')
+          );
           await kong.service.request.setHeader('X-Access-Token', session.access_token || '');
-          return; // pass through
+          return;
         }
       }
-      // Session not found in Redis (expired or tampered) — fall through to redirect.
     }
 
-    // -----------------------------------------------------------------------
-    // 4. Redirect to Keycloak authorization endpoint
-    // -----------------------------------------------------------------------
     return this._redirectToAuth(kong);
   }
 
@@ -209,18 +237,13 @@ class OidcPlugin {
     const state = query['state'];
 
     if (!code || !state) {
-      await kong.response.exit(400, 'Missing code or state parameter', {
-        'Content-Type': 'text/plain',
-      });
+      await kong.response.exit(400, 'Missing code or state parameter', { 'Content-Type': 'text/plain' });
       return;
     }
 
-    // Verify state
     const stateJson = await this.redis.get(`oidc:state:${state}`);
     if (!stateJson) {
-      await kong.response.exit(400, 'Invalid or expired state parameter', {
-        'Content-Type': 'text/plain',
-      });
+      await kong.response.exit(400, 'Invalid or expired state parameter', { 'Content-Type': 'text/plain' });
       return;
     }
 
@@ -229,26 +252,26 @@ class OidcPlugin {
       await kong.response.exit(400, 'Corrupt state data', { 'Content-Type': 'text/plain' });
       return;
     }
-
-    // Delete state immediately (one-time use)
     await this.redis.del(`oidc:state:${state}`);
 
-    // Build redirect_uri from Host header (same as what the browser was using)
+    const endpoints = await this._getEndpoints(kong);
+    if (!endpoints) return;
+
     const host        = await kong.request.getHeader('Host');
     const redirectUri = `http://${host}${this.config.redirect_uri_path || '/oauth2/callback'}`;
 
-    // Exchange authorization code for tokens
-    const tokenBody = encodeForm({
-      grant_type:    'authorization_code',
-      code,
-      redirect_uri:  redirectUri,
-      client_id:     this.config.client_id,
-      client_secret: this.config.client_secret,
-    });
-
     let tokenResponse;
     try {
-      tokenResponse = await httpPost(this.endpoints.token_endpoint, tokenBody);
+      tokenResponse = await httpPost(
+        endpoints.token_endpoint,
+        encodeForm({
+          grant_type:    'authorization_code',
+          code,
+          redirect_uri:  redirectUri,
+          client_id:     this.config.client_id,
+          client_secret: this.config.client_secret,
+        })
+      );
     } catch (err) {
       console.error('[oidc] Token exchange HTTP error:', err.message);
       await kong.response.exit(502, 'Token exchange failed', { 'Content-Type': 'text/plain' });
@@ -257,44 +280,33 @@ class OidcPlugin {
 
     if (tokenResponse.status !== 200 || !tokenResponse.body.id_token) {
       console.error('[oidc] Token exchange failed:', JSON.stringify(tokenResponse.body));
-      await kong.response.exit(502, `Token exchange error: ${JSON.stringify(tokenResponse.body)}`, {
-        'Content-Type': 'text/plain',
-      });
+      await kong.response.exit(502, `Token exchange error: ${JSON.stringify(tokenResponse.body)}`, { 'Content-Type': 'text/plain' });
       return;
     }
 
-    const tokens = tokenResponse.body;
-
-    // Parse ID token payload for user claims
     let userinfo;
     try {
-      userinfo = parseJwtPayload(tokens.id_token);
+      userinfo = parseJwtPayload(tokenResponse.body.id_token);
     } catch (err) {
       console.error('[oidc] Failed to parse ID token:', err.message);
       await kong.response.exit(502, 'Invalid ID token', { 'Content-Type': 'text/plain' });
       return;
     }
 
-    // Create session in Redis (1 hour TTL)
     const sessionId = randomHex(24);
-    const session   = {
-      userinfo,
-      access_token:  tokens.access_token,
-      id_token:      tokens.id_token,
-      refresh_token: tokens.refresh_token,
-    };
     await this.redis.set(
       `oidc:session:${sessionId}`,
-      JSON.stringify(session),
-      'EX',
-      3600
+      JSON.stringify({
+        userinfo,
+        access_token:  tokenResponse.body.access_token,
+        id_token:      tokenResponse.body.id_token,
+        refresh_token: tokenResponse.body.refresh_token,
+      }),
+      'EX', 3600
     );
 
-    // Determine where to redirect after login (stored in state, or fall back to '/')
-    const returnTo = stateData.return_to || '/';
-
     await kong.response.exit(302, '', {
-      'Location':   returnTo,
+      'Location':   stateData.return_to || '/',
       'Set-Cookie': `oidc_session=${sessionId}; Path=/; HttpOnly; SameSite=Lax`,
     });
   }
@@ -304,43 +316,49 @@ class OidcPlugin {
   // -------------------------------------------------------------------------
 
   async _handleLogout(kong) {
-    const cookieHeader = await kong.request.getHeader('Cookie');
-    const cookies      = parseCookies(cookieHeader);
-    const sessionId    = cookies['oidc_session'];
+    const cookies   = parseCookies(await kong.request.getHeader('Cookie'));
+    const sessionId = cookies['oidc_session'];
+    if (sessionId) await this.redis.del(`oidc:session:${sessionId}`);
 
-    if (sessionId) {
-      await this.redis.del(`oidc:session:${sessionId}`);
+    // Build the provider end-session URL. Both Keycloak and Entra support
+    // post_logout_redirect_uri — no provider-specific branching needed.
+    let logoutUrl = this.config.app_base_url || '/';
+    try {
+      const endpoints = await this._endpoints;
+      if (endpoints.end_session_endpoint) {
+        logoutUrl = `${endpoints.end_session_endpoint}?${encodeForm({
+          post_logout_redirect_uri: this.config.app_base_url || '/',
+          client_id:                this.config.client_id,
+        })}`;
+      }
+    } catch (_) {
+      // Discovery failed — fall back to app root
     }
 
-    const redirectUri = this.config.redirect_after_logout_uri || '/';
-
     await kong.response.exit(302, '', {
-      'Location':   redirectUri,
-      // Clear the cookie by setting Max-Age=0
+      'Location':   logoutUrl,
       'Set-Cookie': 'oidc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
     });
   }
 
   // -------------------------------------------------------------------------
-  // _redirectToAuth — redirect browser to Keycloak for authentication
+  // _redirectToAuth — redirect browser to provider authorization endpoint
   // -------------------------------------------------------------------------
 
   async _redirectToAuth(kong) {
-    const state = randomHex(16);
-    const nonce = randomHex(16);
+    const endpoints = await this._getEndpoints(kong);
+    if (!endpoints) return;
 
-    // Remember where the user was trying to go so we can restore after callback
+    const state    = randomHex(16);
+    const nonce    = randomHex(16);
     const returnTo = await kong.request.getPath();
 
-    // Store state in Redis with 10-minute TTL
     await this.redis.set(
       `oidc:state:${state}`,
       JSON.stringify({ nonce, return_to: returnTo }),
-      'EX',
-      600
+      'EX', 600
     );
 
-    // Build redirect_uri from the Host header
     const host        = await kong.request.getHeader('Host');
     const redirectUri = `http://${host}${this.config.redirect_uri_path || '/oauth2/callback'}`;
 
@@ -353,10 +371,8 @@ class OidcPlugin {
       nonce,
     });
 
-    const authUrl = `${this.endpoints.authorization_endpoint}?${params}`;
-
     await kong.response.exit(302, '', {
-      'Location': authUrl,
+      'Location': `${endpoints.authorization_endpoint}?${params}`,
     });
   }
 }
@@ -368,29 +384,25 @@ class OidcPlugin {
 module.exports = {
   Name:   'oidc',
   Plugin: OidcPlugin,
-  // kong-pdk wraps this array in { config: { type:'record', fields:<Schema> } }
-  // automatically, so export only the inner field definitions.
   Schema: [
-    { client_id:                          { type: 'string',  required: true  } },
-    { client_secret:                      { type: 'string',  required: true  } },
-    { discovery:                          { type: 'string',  required: true  } },
-    { internal_host:                      { type: 'string'                   } },
-    { redirect_uri_path:                  { type: 'string',  default: '/oauth2/callback'  } },
-    { scope:                              { type: 'string',  default: 'openid profile email' } },
-    { logout_path:                        { type: 'string',  default: '/oauth2/logout'    } },
-    { redirect_after_logout_uri:          { type: 'string'                   } },
-    { bearer_only:                        { type: 'string',  default: 'no'   } },
-    { realm:                              { type: 'string',  default: 'kong' } },
-    { ssl_verify:                         { type: 'string',  default: 'no'   } },
-    { token_endpoint_auth_method:         { type: 'string',  default: 'client_secret_post' } },
-    { filters:                            { type: 'string'                   } },
-    { session_secret:                     { type: 'string'                   } },
-    { recovery_page_path:                 { type: 'string'                   } },
-    { timeout:                            { type: 'number'                   } },
-    { response_type:                      { type: 'string',  default: 'code' } },
-    { introspection_endpoint:             { type: 'string'                   } },
-    { introspection_endpoint_auth_method: { type: 'string'                   } },
+    { client_id:                          { type: 'string', required: true } },
+    { client_secret:                      { type: 'string', required: true } },
+    { discovery:                          { type: 'string', required: true } },
+    { internal_host:                      { type: 'string' } },
+    { app_base_url:                       { type: 'string', default: 'http://localhost:8000' } },
+    { redirect_uri_path:                  { type: 'string', default: '/oauth2/callback' } },
+    { scope:                              { type: 'string', default: 'openid profile email' } },
+    { logout_path:                        { type: 'string', default: '/oauth2/logout' } },
+    { response_type:                      { type: 'string', default: 'code' } },
+    { ssl_verify:                         { type: 'string', default: 'no' } },
+    { token_endpoint_auth_method:         { type: 'string', default: 'client_secret_post' } },
+    { bearer_only:                        { type: 'string', default: 'no' } },
+    { filters:                            { type: 'string' } },
+    { session_secret:                     { type: 'string' } },
+    { timeout:                            { type: 'number' } },
+    { introspection_endpoint:             { type: 'string' } },
+    { introspection_endpoint_auth_method: { type: 'string' } },
   ],
-  Version:  '2.0.0',
+  Version:  '2.1.0',
   Priority: 1000,
 };

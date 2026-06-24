@@ -1,13 +1,20 @@
 # =============================================================================
-# sso-demo-5 — Kong + OIDC stack with JavaScript PDK plugin.
-#   Keycloak (OP) + Kong (gateway, OIDC plugin = authN) + frontend + backend
-#   + Redis (sessions) + Postgres (Keycloak persistence).
+# sso-demo-5 — Kong OIDC gateway stack.
 #
-# All environment-specific values come from .env (copy .env.example to start).
+# Provider selection via OIDC_PROVIDER in .env:
+#   keycloak (dev/staging): OIDC_PROVIDER=keycloak  COMPOSE_PROFILES=keycloak
+#   entra    (production):  OIDC_PROVIDER=entra      COMPOSE_PROFILES=
+#
+# With COMPOSE_PROFILES=keycloak, Postgres + Keycloak start automatically.
+# With COMPOSE_PROFILES empty, only Kong + Redis + frontend + backend start.
 # =============================================================================
 
 services:
+  # ---------------------------------------------------------------------------
+  # Postgres — Keycloak persistence (keycloak profile only)
+  # ---------------------------------------------------------------------------
   postgres:
+    profiles: [keycloak]
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-keycloak}
@@ -22,7 +29,11 @@ services:
       retries: 10
     networks: [sso]
 
+  # ---------------------------------------------------------------------------
+  # Keycloak — OIDC provider for dev/staging (keycloak profile only)
+  # ---------------------------------------------------------------------------
   keycloak:
+    profiles: [keycloak]
     build: ./keycloak
     command: start --import-realm --optimized
     environment:
@@ -34,8 +45,6 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-keycloak}
       KC_DB_USERNAME: ${POSTGRES_USER:-keycloak}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
-      # Passed through so realm-export.json can use ${env.KONG_CLIENT_SECRET}
-      # and ${env.APP_BASE_URL} for redirect URIs.
       KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
     ports:
@@ -58,6 +67,9 @@ services:
       start_period: 60s
     networks: [sso]
 
+  # ---------------------------------------------------------------------------
+  # Redis — OIDC session storage (always started)
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     ports:
@@ -69,6 +81,9 @@ services:
       retries: 10
     networks: [sso]
 
+  # ---------------------------------------------------------------------------
+  # Kong — OIDC gateway (always started)
+  # ---------------------------------------------------------------------------
   kong:
     build: ./kong
     environment:
@@ -81,13 +96,19 @@ services:
       KONG_PROXY_LISTEN: "0.0.0.0:8000"
       KONG_ADMIN_LISTEN: "0.0.0.0:8001"
       KONG_LOG_LEVEL: ${KONG_LOG_LEVEL:-info}
-      # Vars consumed by entrypoint.sh → envsubst → kong.yml.template
-      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET}
+      # Provider flag — drives entrypoint.sh logic
+      OIDC_PROVIDER: ${OIDC_PROVIDER:-keycloak}
+      # Keycloak-specific vars (used when OIDC_PROVIDER=keycloak)
+      KONG_CLIENT_SECRET: ${KONG_CLIENT_SECRET:-}
       KC_URL: ${KC_URL:-http://localhost:8080}
       KC_REALM: ${KC_REALM:-demo}
       KC_INTERNAL_HOST: ${KC_INTERNAL_HOST:-keycloak:8080}
+      # Entra-specific vars (used when OIDC_PROVIDER=entra)
+      AZURE_TENANT_ID: ${AZURE_TENANT_ID:-}
+      AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET:-}
+      # Shared
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
-      # Vars consumed by the OIDC plugin at runtime
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: ${REDIS_PORT:-6379}
     ports:
@@ -96,10 +117,11 @@ services:
     volumes:
       - ./kong/kong.yml.template:/kong/kong.yml.template:ro
     depends_on:
-      keycloak:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      keycloak:
+        condition: service_healthy
+        required: false   # not present when OIDC_PROVIDER=entra
     healthcheck:
       test: ["CMD", "kong", "health"]
       interval: 10s
@@ -108,6 +130,9 @@ services:
       start_period: 20s
     networks: [sso]
 
+  # ---------------------------------------------------------------------------
+  # Backend + Frontend (always started)
+  # ---------------------------------------------------------------------------
   backend:
     build: ./backend
     environment:

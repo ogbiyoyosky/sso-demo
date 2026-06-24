@@ -21,8 +21,12 @@ else
 fi
 
 # Expand only the vars we own; leave any other ${...} in the YAML untouched.
+# Then drop the internal_host line entirely if it resolved to empty string —
+# Kong's schema requires length >= 1, so the field must be absent, not blank.
 envsubst '${OIDC_DISCOVERY_URL} ${OIDC_CLIENT_ID} ${OIDC_CLIENT_SECRET} ${OIDC_INTERNAL_HOST} ${OIDC_SCOPE} ${APP_BASE_URL}' \
-  < /kong/kong.yml.template > /tmp/kong.yml
+  < /kong/kong.yml.template \
+  | sed '/internal_host: ""/d' \
+  > /tmp/kong.yml
 
 export KONG_DECLARATIVE_CONFIG=/tmp/kong.yml
 exec /docker-entrypoint.sh "$@"
